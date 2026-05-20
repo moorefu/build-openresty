@@ -2,12 +2,12 @@
 set -e
 
 # Usage: ./build-openresty.sh <version> [openssl-ver] [pcre-ver] [zlib-ver] [arch]
-# Example: ./build-openresty.sh 1.29.2.4 1.1.1w 10.47 1.3.1 x86_64
+# Example: ./build-openresty.sh 1.29.2.4 3.5.6 10.47 1.3.2 x86_64
 
 VERSION="${1:?Usage: $0 <version> [openssl-ver] [pcre-ver] [zlib-ver] [arch]}"
-OS_VER="${2:-1.1.1w}"
+OS_VER="${2:-3.5.6}"
 PCRE_VER="${3:-10.47}"
-ZLIB_VER="${4:-1.3.1}"
+ZLIB_VER="${4:-1.3.2}"
 ARCH="${5:-$(uname -m)}"
 PREFIX=/usr/local/openresty
 
