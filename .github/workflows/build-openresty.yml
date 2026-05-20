@@ -16,7 +16,7 @@ on:
       pcre_version:
         required: false
         type: string
-        default: '8.45'
+        default: '10.47'
       zlib_version:
         required: false
         type: string
@@ -48,7 +48,7 @@ on:
         description: 'PCRE version'
         required: false
         type: string
-        default: '8.45'
+        default: '10.47'
       zlib_version:
         description: 'zlib version'
         required: false

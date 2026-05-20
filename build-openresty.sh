@@ -2,11 +2,11 @@
 set -e
 
 # Usage: ./build-openresty.sh <version> [openssl-ver] [pcre-ver] [zlib-ver] [arch]
-# Example: ./build-openresty.sh 1.29.2.4 1.1.1w 8.45 1.3.1 x86_64
+# Example: ./build-openresty.sh 1.29.2.4 1.1.1w 10.47 1.3.1 x86_64
 
 VERSION="${1:?Usage: $0 <version> [openssl-ver] [pcre-ver] [zlib-ver] [arch]}"
 OS_VER="${2:-1.1.1w}"
-PCRE_VER="${3:-8.45}"
+PCRE_VER="${3:-10.47}"
 ZLIB_VER="${4:-1.3.1}"
 ARCH="${5:-$(uname -m)}"
 PREFIX=/usr/local/openresty
@@ -45,8 +45,8 @@ OPENSSL_URL="https://www.openssl.org/source/openssl-${OS_VER}.tar.gz"
   OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-${OS_VER}/openssl-${OS_VER}.tar.gz"
 download "$OPENSSL_URL"
 
-# Download PCRE source
-download "https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VER}/pcre-${PCRE_VER}.tar.gz"
+# Download PCRE2 source
+download "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VER}/pcre2-${PCRE_VER}.tar.gz"
 
 # Download zlib source
 download "https://zlib.net/zlib-${ZLIB_VER}.tar.gz"
@@ -57,7 +57,7 @@ download "https://openresty.org/download/openresty-${VERSION}.tar.gz"
 
 # Extract deps (OpenResty will build them itself)
 tar xzf "openssl-${OS_VER}.tar.gz"
-tar xzf "pcre-${PCRE_VER}.tar.gz"
+tar xzf "pcre2-${PCRE_VER}.tar.gz"
 tar xzf "zlib-${ZLIB_VER}.tar.gz"
 
 # Extract and build OpenResty
@@ -67,7 +67,7 @@ cd "openresty-${VERSION}"
 ./configure \
   --prefix="$PREFIX" \
   --with-openssl="../openssl-${OS_VER}" \
-  --with-pcre="../pcre-${PCRE_VER}" \
+  --with-pcre="../pcre2-${PCRE_VER}" \
   --with-zlib="../zlib-${ZLIB_VER}" \
   --with-pcre-jit \
   --with-ipv6 \
