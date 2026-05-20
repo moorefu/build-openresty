@@ -52,10 +52,6 @@ sed -i "s/\\\$OS eq 'msys'/\\\$OS eq 'msys' || \\\$OS eq 'cygwin'/g" configure
 # popping up a visible cmd window. 'cmd //c' passes args literally.
 sed -i "s|cmd /c '|cmd //c '|g" util/package-win32.sh
 
-# Fix 3: Modern MSYS2 uses SJLJ exception handling for i686,
-# producing libgcc_s_sjlj-1.dll instead of libgcc_s_dw2-1.dll.
-# Use a glob to match either variant.
-sed -i "s/libgcc_s_dw2-1\\.dll/libgcc_s_*-1.dll/g" util/package-win32.sh
 
 echo "==> Running util/build-win32.sh"
 bash util/build-win32.sh
