@@ -42,6 +42,16 @@ cd "openresty-${VERSION}"
 export JOBS="${JOBS:-$(nproc)}"
 
 # Build using OpenResty's own Windows build script
+echo "==> Applying platform patches"
+
+# Fix 1: $OS returns 'cygwin' (not 'msys') under MSYS2 perl,
+# causing Windows-specific LuaJIT DLL installation to be skipped.
+sed -i "s/\\\$OS eq 'msys'/\\\$OS eq 'msys' || \\\$OS eq 'cygwin'/g" configure
+
+# Fix 2: 'cmd /c' triggers MSYS2 path translation (/c -> C:\),
+# popping up a visible cmd window. 'cmd //c' passes args literally.
+sed -i "s|cmd /c '|cmd //c '|g" util/package-win32.sh
+
 echo "==> Running util/build-win32.sh"
 bash util/build-win32.sh
 

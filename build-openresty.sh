@@ -98,4 +98,5 @@ tar -cJf "../${DIST}.tar.xz" usr/local/openresty
 cd ..
 sha256sum "${DIST}.tar.xz" > "${DIST}.tar.xz.sha256"
 
-echo "==> Done: $(pwd)/${DIST}.tar.xz"
+mv "${DIST}.tar.xz" "${DIST}.tar.xz.sha256" ..
+echo "==> Done: $(cd .. && pwd)/${DIST}.tar.xz"
