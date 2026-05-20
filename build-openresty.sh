@@ -49,7 +49,8 @@ download "$OPENSSL_URL"
 download "https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VER}/pcre-${PCRE_VER}.tar.gz"
 
 # Download zlib source
-download "https://zlib.net/fossils/zlib-${ZLIB_VER}.tar.gz"
+download "https://zlib.net/zlib-${ZLIB_VER}.tar.gz"
+
 
 # Download OpenResty
 download "https://openresty.org/download/openresty-${VERSION}.tar.gz"
