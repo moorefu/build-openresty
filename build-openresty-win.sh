@@ -52,6 +52,9 @@ sed -i "s/\\\$OS eq 'msys'/\\\$OS eq 'msys' || \\\$OS eq 'cygwin'/g" configure
 # popping up a visible cmd window. 'cmd //c' passes args literally.
 sed -i "s|cmd /c '|cmd //c '|g" util/package-win32.sh
 
+# Fix 3: Hardcoded /c/msys64/mingw32 doesn't match GitHub Actions
+# MSYS2 install path. Use the MSYS2 mount /mingw32 instead.
+sed -i "s#mingw32=/c/msys64/mingw32#mingw32=/mingw32#" util/package-win32.sh
 
 echo "==> Running util/build-win32.sh"
 bash util/build-win32.sh
