@@ -36,7 +36,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Version to build (e.g. 1.29.2.4)'
+        description: 'Version to build (e.g. 1.31.1.1)'
         required: true
         type: string
       openssl_version:
@@ -114,7 +114,7 @@ jobs:
             -v "$(pwd)":/workspace \
             -w /workspace \
             ${{ matrix.image }} \
-            bash build-openresty.sh "$BIND_VERSION" "$OS_VER" "$PCRE_VER" "$ZLIB_VER" "$ARCH"
+            bash -c 'bash ci-fix-yum-repos.sh && bash build-openresty.sh "$BIND_VERSION" "$OS_VER" "$PCRE_VER" "$ZLIB_VER" "$ARCH"'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -123,6 +123,7 @@ jobs:
           path: |
             openresty-*-linux-glibc2.17-${{ matrix.arch }}-openssl-*.tar.xz
             openresty-*-linux-glibc2.17-${{ matrix.arch }}-openssl-*.tar.xz.sha256
+            benchmark-*.txt
 
   build-windows:
     needs: prepare
@@ -156,6 +157,7 @@ jobs:
             perl
             wget
             zip
+            curl
             dos2unix
 
       - name: Build with MSYS2
@@ -185,6 +187,19 @@ jobs:
 
       - uses: actions/download-artifact@v4
 
+      - name: Compose release body with benchmark results
+        run: |
+          {
+            echo "## 基准测试结果"
+            echo
+            echo "共享 CI runner 上的参考数字, 波动较大, 仅供版本间粗对比。"
+            for f in */benchmark-*.txt; do
+              [ -f "$f" ] || continue
+              cat "$f"
+              echo
+            done
+          } > release_body.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -193,6 +208,7 @@ jobs:
           tag_name: ${{ env.VERSION }}
           make_latest: "${{ inputs.make_latest }}"
           prerelease: ${{ inputs.prerelease }}
+          body_path: release_body.md
           files: |
             openresty-linux-x86_64/openresty-${{ env.VERSION }}-linux-glibc2.17-x86_64-openssl-${{ env.OS_VER }}.tar.xz
             openresty-linux-x86_64/openresty-${{ env.VERSION }}-linux-glibc2.17-x86_64-openssl-${{ env.OS_VER }}.tar.xz.sha256

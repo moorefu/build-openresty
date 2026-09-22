@@ -1,0 +1,16 @@
+# 本地源码缓存与构建产物不入库, CI 冷启动自动下载
+cache/
+# 构建解压的源码目录与解包验证临时目录
+openresty-*/
+openssl-*/
+pcre2-*/
+zlib-*/
+ngx_http_proxy_connect_module-*/
+.or-*/
+# 构建产物
+*.tar.xz
+*.tar.xz.sha256
+*.zip
+*.zip.sha256
+# 本地跑基准产生的结果文件
+benchmark-*.txt

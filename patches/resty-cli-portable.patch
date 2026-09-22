@@ -1,0 +1,25 @@
+--- a/bin/resty
++++ b/bin/resty
+@@ -19,6 +19,6 @@
+ # OpenResty's build system would patch the following line to initialize
+ # the $nginx_path variable to point to the path of its own nginx binary
+ # directly.
+-my $nginx_path = '/usr/local/openresty/nginx/sbin/nginx';
++my $nginx_path;
+
+ my $WNOHANG = 1;
+@@ -546,7 +546,13 @@
+     exec $cmd or die "Failed to run command \"$cmd\": $!\n";
+ }
+
+-my $lua_package_path_config = '';
++# 便携改动: 按脚本自身位置推导包根, 注入包内 lualib / luajit 的模块搜索
++# 路径。上游此处为空串, 依赖编译进 nginx 二进制的 LUA_DEFAULT_PATH 绝对
++# 路径; 便携包解压到任意位置后该路径失效, resty.core 将无法加载。
++my $or_root = File::Spec->catdir($FindBin::RealBin, "..");
++my $lua_package_path_config = "    lua_package_path \""
++    . $or_root . "/lualib/?.lua;" . $or_root . "/site/lualib/?.lua;;\";\n"
++    . "    lua_package_cpath \"" . $or_root . "/luajit/lib/?.so;;\";\n";
+ if (@inc_dirs) {
+     my $package_path = "";
+     my $package_path2 = "";

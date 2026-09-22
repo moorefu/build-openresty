@@ -1,0 +1,5 @@
+# CI 在 Linux/MSYS2 上执行, 脚本与补丁必须保持 LF
+*.sh text eol=lf
+*.patch text eol=lf
+*.yml text eol=lf
+*.md text eol=lf

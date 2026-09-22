@@ -1,0 +1,105 @@
+diff --git a/src/http/ngx_http_core_module.c b/src/http/ngx_http_core_module.c
+index 4be3c99..63f5abd 100644
+--- a/src/http/ngx_http_core_module.c
++++ b/src/http/ngx_http_core_module.c
+@@ -988,6 +988,14 @@ ngx_http_core_find_config_phase(ngx_http_request_t *r,
+     r->content_handler = NULL;
+     r->uri_changed = 0;
+ 
++#if (NGX_HTTP_PROXY_CONNECT)
++    if (r->method == NGX_HTTP_CONNECT) {
++        ngx_http_update_location_config(r);
++        r->phase_handler++;
++        return NGX_AGAIN;
++    }
++#endif
++
+     rc = ngx_http_core_find_location(r);
+ 
+     if (rc == NGX_ERROR) {
+diff --git a/src/http/ngx_http_request.c b/src/http/ngx_http_request.c
+index 1518d50..c50e676 100644
+--- a/src/http/ngx_http_request.c
++++ b/src/http/ngx_http_request.c
+@@ -1165,6 +1165,11 @@ ngx_http_process_request_line(ngx_event_t *rev)
+                 r->http_protocol.len = r->request_end - r->http_protocol.data;
+             }
+ 
++#if (NGX_HTTP_PROXY_CONNECT)
++            if (r->method == NGX_HTTP_CONNECT) {
++                /* skip request uri processing for CONNECT */
++            } else
++#endif
+             if (ngx_http_process_request_uri(r) != NGX_OK) {
+                 break;
+             }
+@@ -1201,6 +1206,33 @@ ngx_http_process_request_line(ngx_event_t *rev)
+                 r->port = port;
+             }
+ 
++#if (NGX_HTTP_PROXY_CONNECT)
++            if (r->method == NGX_HTTP_CONNECT) {
++                u_char  *p;
++
++                r->connect_host = r->headers_in.server;
++                r->connect_port_n = r->port;
++
++                if (r->connect_port_n == 0) {
++                    ngx_log_error(NGX_LOG_INFO, c->log, 0,
++                                  "client sent invalid port in request line");
++                    ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
++                    break;
++                }
++
++                /* extract port string from the host:port area of request line */
++                p = r->host_end;
++                while (p > r->host_start && p[-1] >= '0' && p[-1] <= '9') {
++                    p--;
++                }
++
++                if (p > r->host_start && p[-1] == ':') {
++                    r->connect_port.data = p;
++                    r->connect_port.len = r->host_end - p;
++                }
++            }
++#endif
++
+             if (r->http_version < NGX_HTTP_VERSION_10) {
+ 
+                 if (r->headers_in.server.len == 0
+diff --git a/src/http/ngx_http_request.h b/src/http/ngx_http_request.h
+index 6d18cc3..e902842 100644
+--- a/src/http/ngx_http_request.h
++++ b/src/http/ngx_http_request.h
+@@ -424,6 +424,12 @@ struct ngx_http_request_s {
+     ngx_str_t                         exten;
+     ngx_str_t                         unparsed_uri;
+ 
++#if (NGX_HTTP_PROXY_CONNECT)
++    ngx_str_t                         connect_host;
++    ngx_str_t                         connect_port;
++    in_port_t                         connect_port_n;
++#endif
++
+     ngx_str_t                         method_name;
+     ngx_str_t                         http_protocol;
+     ngx_str_t                         schema;
+diff --git a/src/http/ngx_http_variables.c b/src/http/ngx_http_variables.c
+index 37cd0d2..20661df 100644
+--- a/src/http/ngx_http_variables.c
++++ b/src/http/ngx_http_variables.c
+@@ -167,6 +167,14 @@ static ngx_int_t ngx_http_variable_time_local(ngx_http_request_t *r,
+ 
+ static ngx_http_variable_t  ngx_http_core_variables[] = {
+ 
++#if (NGX_HTTP_PROXY_CONNECT)
++    { ngx_string("connect_host"), NULL, ngx_http_variable_request,
++      offsetof(ngx_http_request_t, connect_host), 0, 0 },
++
++    { ngx_string("connect_port"), NULL, ngx_http_variable_request,
++      offsetof(ngx_http_request_t, connect_port), 0, 0 },
++#endif
++
+     { ngx_string("http_host"), NULL, ngx_http_variable_header,
+       offsetof(ngx_http_request_t, headers_in.host), 0, 0 },
+ 
