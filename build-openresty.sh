@@ -172,7 +172,9 @@ fi
 # ---------- 动态 zlib ----------
 if [ ! -f "$DEPS/zlib/lib/libz.so" ]; then
   log "编译动态 zlib $ZLIB_VER"
-  download "https://zlib.net/zlib-${ZLIB_VER}.tar.gz"
+  # zlib.net 对 CI 机房偶发返回非 gzip 的拦截页(200 + HTML), 换用 zlib 官方
+  # GitHub 仓库 release 资产(与 zlib.net 发布包同源)
+  download "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz"
   tar -xzf "zlib-$ZLIB_VER.tar.gz"
   cd "zlib-$ZLIB_VER"
   ./configure --shared --prefix="$DEPS/zlib"
