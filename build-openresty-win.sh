@@ -65,8 +65,12 @@ tar xzf "proxy-connect-${PROXY_CONNECT_VER}.tar.gz"
 
 cd "openresty-${VERSION}"
 
-# Let upstream build script control parallelism
-export JOBS="${JOBS:-$(nproc)}"
+# Let upstream build script control parallelism.
+# 上限 4: GitHub Windows runner 核数增大后 $(nproc) 高并发 MinGW gcc 会随机
+# 挂死(编译单文件中途无输出), 限并发以稳定构建
+JOBS_DEFAULT="$(nproc)"
+[ "$JOBS_DEFAULT" -gt 4 ] && JOBS_DEFAULT=4
+export JOBS="${JOBS:-$JOBS_DEFAULT}"
 
 # Build using OpenResty's own Windows build script
 echo "==> Applying platform patches"

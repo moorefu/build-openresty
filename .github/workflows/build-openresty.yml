@@ -147,7 +147,10 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
-          update: true
+          # 不做 pacman -Syu 全量升级: 锁定 runner 预装工具链版本,
+          # 避免上游滚动更新引入的 MinGW gcc 挂死 (曾出现编译单文件中途
+          # 无输出 20+ 分钟); install 需要的包仍正常安装
+          update: false
           install: >-
             ${{ matrix.toolchain }}
             make
