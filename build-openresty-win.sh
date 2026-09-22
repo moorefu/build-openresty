@@ -2,10 +2,17 @@
 set -e
 
 # Usage: ./build-openresty-win.sh <version> [arch]
-# Run inside MSYS2 MINGW64 shell
+# Run inside MSYS2 MINGW64/MINGW32 shell
 #
 # Delegates to OpenResty's own util/build-win32.sh and util/package-win32.sh
 # for a build process that matches upstream's tested Windows configuration.
+#
+# CI Windows runner 上 MinGW gcc 偶发编译挂死(单个 gcc 调用中途永久停止
+# 输出, 本地无法复现), 因此构建主体包了输出停滞看门狗 + 整体重试:
+#   - run_with_watchdog: 后台跑命令, 日志停滞 >6 分钟即 taskkill 整个
+#     进程树并按失败处理(增量回显日志保持 CI 可观测)
+#   - 失败自动清理源码树从头重试, 最多 3 次
+# 打包后自动做解包冒烟(静态 + Lua, 验证 nginx.exe/LuaJIT 可用)。
 
 VERSION="${1:?Usage: $0 <version> [arch]}"
 ARCH="${2:-x86_64}"
@@ -31,8 +38,16 @@ else
     PROXY_CONNECT_NEW_NGINX=0
 fi
 
+# 上限 4: GitHub Windows runner 核数增大后 $(nproc) 高并发 MinGW gcc 会随机
+# 挂死(编译单文件中途无输出), 限并发以稳定构建
+JOBS_DEFAULT="$(nproc)"
+[ "$JOBS_DEFAULT" -gt 4 ] && JOBS_DEFAULT=4
+export JOBS="${JOBS:-$JOBS_DEFAULT}"
+
 CACHE_DIR="${CACHE_DIR:-$(pwd)/cache}"
 mkdir -p "$CACHE_DIR"
+
+log() { echo "==> $*"; }
 
 download() {
   local url="$1"
@@ -52,50 +67,79 @@ for cmd in wget zip unzip unix2dos patch perl gcc make curl; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd is required"; exit 1; }
 done
 
-echo "==> Building OpenResty ${VERSION} for Windows (MSYS2)"
+log "Building OpenResty ${VERSION} for Windows (MSYS2)"
 
-# Download and extract OpenResty source
-download "https://openresty.org/download/openresty-${VERSION}.tar.gz"
-tar xzf "openresty-${VERSION}.tar.gz"
+# run_with_watchdog <停滞秒数> <命令...>
+# 后台执行命令; 每 30s 检查日志增量回显; 日志大小停滞超过阈值视为挂死,
+# taskkill 整个 Windows 进程树(挂死的 gcc 无法被 msys kill 单独杀死),
+# 返回 124。命令正常退出则透传返回码。
+run_with_watchdog() {
+  local idle_secs="$1"; shift
+  local wdlog="/tmp/or-wd-$$.$RANDOM.log"
+  local last_size=0 last_emit=0 last_change
+  rm -f "$wdlog"; touch "$wdlog"
+  last_change=$(date +%s)
+  "$@" > "$wdlog" 2>&1 &
+  local pgid=$!
+  while kill -0 "$pgid" 2>/dev/null; do
+    sleep 30
+    local sz winpid
+    sz=$(stat -c %s "$wdlog" 2>/dev/null || echo 0)
+    # 增量回显新日志, 保持 CI 实时可观测
+    if [ "$sz" -gt "$last_emit" ]; then
+      tail -c +"$((last_emit + 1))" "$wdlog"
+      last_emit=$sz
+    fi
+    if [ "$sz" != "$last_size" ]; then
+      last_size=$sz; last_change=$(date +%s)
+    elif [ $(( $(date +%s) - last_change )) -gt "$idle_secs" ]; then
+      echo "==> 看门狗: 日志停滞超过 ${idle_secs}s, 终止进程树 (msys pid $pgid)" >&2
+      winpid="$(cat "/proc/$pgid/winpid" 2>/dev/null || echo "$pgid")"
+      taskkill //T //F //PID "$winpid" >/dev/null 2>&1 || kill -9 "$pgid" 2>/dev/null || true
+      sleep 2
+      kill -0 "$pgid" 2>/dev/null && kill -9 "$pgid" 2>/dev/null || true
+      if [ "$last_emit" -lt "$sz" ]; then tail -c +"$((last_emit + 1))" "$wdlog"; fi
+      rm -f "$wdlog"
+      return 124
+    fi
+  done
+  local rc=0
+  wait "$pgid" || rc=$?
+  local sz2
+  sz2=$(stat -c %s "$wdlog" 2>/dev/null || echo 0)
+  if [ "$sz2" -gt "$last_emit" ]; then tail -c +"$((last_emit + 1))" "$wdlog"; fi
+  rm -f "$wdlog"
+  return $rc
+}
 
-# Download and extract ngx_http_proxy_connect_module (CONNECT method support)
-download "https://github.com/chobits/ngx_http_proxy_connect_module/archive/refs/tags/${PROXY_CONNECT_VER}.tar.gz" \
-  "proxy-connect-${PROXY_CONNECT_VER}.tar.gz"
-tar xzf "proxy-connect-${PROXY_CONNECT_VER}.tar.gz"
+# attempt_build: 解压源码 -> 平台适配 sed -> 注入模块 -> 看门狗内构建
+# (失败由调用方清理重试; 从源码树外调用)
+attempt_build() {
+  rm -rf "openresty-${VERSION}"
+  tar xzf "openresty-${VERSION}.tar.gz"
+  cd "openresty-${VERSION}"
 
-cd "openresty-${VERSION}"
+  # Fix 1: $OS returns 'cygwin' (not 'msys') under MSYS2 perl,
+  # causing Windows-specific LuaJIT DLL installation to be skipped.
+  sed -i "s/\\\$OS eq 'msys'/\\\$OS eq 'msys' || \\\$OS eq 'cygwin'/g" configure
 
-# Let upstream build script control parallelism.
-# 上限 4: GitHub Windows runner 核数增大后 $(nproc) 高并发 MinGW gcc 会随机
-# 挂死(编译单文件中途无输出), 限并发以稳定构建
-JOBS_DEFAULT="$(nproc)"
-[ "$JOBS_DEFAULT" -gt 4 ] && JOBS_DEFAULT=4
-export JOBS="${JOBS:-$JOBS_DEFAULT}"
+  # Fix 2: 'cmd /c' triggers MSYS2 path translation (/c -> C:\),
+  # popping up a visible cmd window. 'cmd //c' passes args literally.
+  sed -i "s|cmd /c '|cmd //c '|g" util/package-win32.sh
 
-# Build using OpenResty's own Windows build script
-echo "==> Applying platform patches"
+  # Fix 3: Hardcoded /c/msys64/mingw32 doesn't match GitHub Actions
+  # MSYS2 install path. Use the MSYS2 mount /mingw32 instead.
+  sed -i "s#mingw32=/c/msys64/mingw32#mingw32=/mingw32#" util/package-win32.sh
 
-# Fix 1: $OS returns 'cygwin' (not 'msys') under MSYS2 perl,
-# causing Windows-specific LuaJIT DLL installation to be skipped.
-sed -i "s/\\\$OS eq 'msys'/\\\$OS eq 'msys' || \\\$OS eq 'cygwin'/g" configure
+  # Fix 4: zlib.net returns 415 for plain HTTP wget requests.
+  # Use HTTPS instead.
+  sed -i "s#http://zlib.net/#https://zlib.net/#" util/build-win32.sh
 
-# Fix 2: 'cmd /c' triggers MSYS2 path translation (/c -> C:\),
-# popping up a visible cmd window. 'cmd //c' passes args literally.
-sed -i "s|cmd /c '|cmd //c '|g" util/package-win32.sh
-
-# Fix 3: Hardcoded /c/msys64/mingw32 doesn't match GitHub Actions
-# MSYS2 install path. Use the MSYS2 mount /mingw32 instead.
-sed -i "s#mingw32=/c/msys64/mingw32#mingw32=/mingw32#" util/package-win32.sh
-
-# Fix 4: zlib.net returns 415 for plain HTTP wget requests.
-# Use HTTPS instead.
-sed -i "s#http://zlib.net/#https://zlib.net/#" util/build-win32.sh
-
-# Fix 5: 集成 ngx_http_proxy_connect_module。
-# 1) 给 configure 注入 --add-module（绝对路径，避免相对路径在 build/ 内解析错误）；
-# 2) 在 make 之前调用 win-patch-apply.sh 给 nginx 核心和模块打补丁。
-if [ "${PROXY_CONNECT_NEW_NGINX}" = "1" ]; then
-  cat > win-patch-apply.sh <<EOF
+  # Fix 5: 集成 ngx_http_proxy_connect_module。
+  # 1) 给 configure 注入 --add-module（绝对路径，避免相对路径在 build/ 内解析错误）；
+  # 2) 在 make 之前调用 win-patch-apply.sh 给 nginx 核心和模块打补丁。
+  if [ "${PROXY_CONNECT_NEW_NGINX}" = "1" ]; then
+    cat > win-patch-apply.sh <<EOF
 #!/bin/bash
 set -e
 NGINX_SRC="\$(pwd)/\$(find build -maxdepth 1 -type d -name 'nginx-*' | head -1)"
@@ -104,33 +148,58 @@ patch -d "\${NGINX_SRC}" -p1 < "${SCRIPT_DIR}/patches/${PROXY_CONNECT_PATCH}" ||
 echo "==> Patching proxy_connect module for nginx 1.31+"
 patch -d "\$(pwd)/../${PROXY_CONNECT_DIR}" -p1 < "${SCRIPT_DIR}/patches/proxy_connect_module_1311.patch" || exit 1
 EOF
-else
-  cat > win-patch-apply.sh <<EOF
+  else
+    cat > win-patch-apply.sh <<EOF
 #!/bin/bash
 set -e
 NGINX_SRC="\$(pwd)/\$(find build -maxdepth 1 -type d -name 'nginx-*' | head -1)"
 echo "==> Patching nginx core at \${NGINX_SRC} (${PROXY_CONNECT_PATCH})"
 patch -d "\${NGINX_SRC}" -p1 < "\$(pwd)/../${PROXY_CONNECT_DIR}/patch/${PROXY_CONNECT_PATCH}" || exit 1
 EOF
-fi
-chmod +x win-patch-apply.sh
-# configure 参数注入 --add-module（绝对路径，避免相对路径在 build/ 内解析错误）。
-# 匹配 --with-openssl=objs/lib/ 行（唯一），在其后追加 --add-module。
-ADDON_DIR="$(pwd)/../${PROXY_CONNECT_DIR}"
-export ADDON_DIR
-perl -i -pe 'if (/^    --with-openssl=objs\/lib\/\$OPENSSL/) {
-    $_ .= "    --add-module=\"$ENV{ADDON_DIR}\" \x5c\n";
-}' util/build-win32.sh
-# make 之前调用补丁脚本（匹配 make -j$JOBS 行，唯一）
-perl -i -pe 'if (/^make -j\$JOBS/) {
-    $_ = "bash win-patch-apply.sh || exit 1\n" . $_;
-}' util/build-win32.sh
+  fi
+  chmod +x win-patch-apply.sh
+  # configure 参数注入 --add-module（绝对路径，避免相对路径在 build/ 内解析错误）。
+  # 匹配 --with-openssl=objs/lib/ 行（唯一），在其后追加 --add-module。
+  ADDON_DIR="$(pwd)/../${PROXY_CONNECT_DIR}"
+  export ADDON_DIR
+  perl -i -pe 'if (/^    --with-openssl=objs\/lib\/\$OPENSSL/) {
+      $_ .= "    --add-module=\"$ENV{ADDON_DIR}\" \x5c\n";
+  }' util/build-win32.sh
+  # make 之前调用补丁脚本（匹配 make -j$JOBS 行，唯一）
+  perl -i -pe 'if (/^make -j\$JOBS/) {
+      $_ = "bash win-patch-apply.sh || exit 1\n" . $_;
+  }' util/build-win32.sh
 
-echo "==> Running util/build-win32.sh"
-bash util/build-win32.sh
+  log "Running util/build-win32.sh (watchdog: 6min idle kill)"
+  run_with_watchdog 360 bash util/build-win32.sh
+}
 
-# Package using OpenResty's own Windows packaging script
-echo "==> Running util/package-win32.sh"
+# ---------- 下载 ----------
+ROOT_DIR="$(pwd)"
+download "https://openresty.org/download/openresty-${VERSION}.tar.gz"
+download "https://github.com/chobits/ngx_http_proxy_connect_module/archive/refs/tags/${PROXY_CONNECT_VER}.tar.gz" \
+  "proxy-connect-${PROXY_CONNECT_VER}.tar.gz"
+tar xzf "proxy-connect-${PROXY_CONNECT_VER}.tar.gz"
+
+# ---------- 构建(带重试) ----------
+# CI Windows runner 上 MinGW gcc 偶发挂死且无法在进程内恢复, 只能整体
+# 重试; 每次 attempt_build 从干净源码树开始(含全部平台适配 sed)。
+BUILD_OK=0
+for attempt in 1 2 3; do
+  log "构建尝试 ${attempt}/3"
+  cd "$ROOT_DIR"
+  rc=0
+  attempt_build || rc=$?
+  if [ "$rc" = "0" ]; then
+    BUILD_OK=1
+    break
+  fi
+  log "构建尝试 ${attempt} 失败 (exit $rc), 清理后重试"
+done
+[ "$BUILD_OK" = "1" ] || { echo "ERROR: build failed after 3 attempts" >&2; exit 1; }
+
+# ---------- 打包 ----------
+log "Running util/package-win32.sh"
 bash util/package-win32.sh
 
 # Find the generated zip and rename to our convention
@@ -148,10 +217,12 @@ sha256sum "${DIST}.zip" > "${DIST}.zip.sha256"
 # ---------- 解包冒烟 ----------
 # 解包 zip 产物再验证: 官方 win 包编译期 prefix 为空, nginx 以 cwd 为
 # prefix, 天然便携。断言静态页 + Lua content (后者验证 LuaJIT 运行时加载)。
+# 注意: nginx.exe 在 CI 的 msys2 shell 里前台运行会阻塞 bash, 必须 & 后台
+# 启动; curl 探测加 --max-time 防连接挂起。
 WPORT=18480
 cleanup_smoke() { taskkill //F //IM nginx.exe >/dev/null 2>&1 || true; }
 trap cleanup_smoke EXIT
-echo "==> 解包冒烟验证 (静态 + Lua, 端口 $WPORT)"
+log "解包冒烟验证 (静态 + Lua, 端口 $WPORT)"
 VERIFY=".or-win-verify.$$"
 rm -rf "$VERIFY"; mkdir "$VERIFY"
 unzip -q "${DIST}.zip" -d "$VERIFY"
@@ -167,28 +238,34 @@ http {
   server {
     listen 127.0.0.1:$WPORT;
     location = /s { default_type text/plain; return 200 "win-smoke-static-ok"; }
-    location = /lua { default_type text/plain; content_by_lua_block { return "win-smoke-lua-ok" } }
+    location = /lua { default_type text/plain; content_by_lua_block { ngx.print("win-smoke-lua-ok") } }
   }
 }
 EOF
-./nginx.exe -p .
+./nginx.exe -p . > "$PWD/nginx-smoke.out" 2>&1 &
+NGX_PID=$!
 READY=0
 for _ in $(seq 1 50); do
-  if curl -sf -o /dev/null "http://127.0.0.1:$WPORT/s" 2>/dev/null; then READY=1; break; fi
+  if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$WPORT/s" 2>/dev/null; then READY=1; break; fi
+  kill -0 "$NGX_PID" 2>/dev/null || break
   sleep 0.2
 done
 if [ "$READY" != "1" ]; then
   echo "ERROR: nginx.exe did not become ready on port $WPORT" >&2
   cat logs/error.log >&2 || true
+  cat nginx-smoke.out >&2 || true
   exit 1
 fi
-body="$(curl -sf "http://127.0.0.1:$WPORT/s")"
+body="$(curl -sf --max-time 5 "http://127.0.0.1:$WPORT/s")"
 [ "$body" = "win-smoke-static-ok" ] || { echo "ERROR: static assertion failed: $body" >&2; exit 1; }
-body="$(curl -sf "http://127.0.0.1:$WPORT/lua")"
+body="$(curl -sf --max-time 5 "http://127.0.0.1:$WPORT/lua")"
 [ "$body" = "win-smoke-lua-ok" ] || { echo "ERROR: lua assertion failed: $body" >&2; exit 1; }
-echo "==> 解包冒烟通过"
+log "解包冒烟通过"
+./nginx.exe -p . -s quit >/dev/null 2>&1 || true
+sleep 1
+cleanup_smoke
 cd ../..
 rm -rf "$VERIFY"
 trap - EXIT
 
-echo "==> Done: $(pwd)/${DIST}.zip"
+log "Done: $(pwd)/${DIST}.zip"
