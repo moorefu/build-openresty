@@ -413,8 +413,11 @@ check_ldd "$STAGE/$INNER/luajit/bin/luajit" \
 log "L1 冒烟测试 (默认conf/静态/Lua/TLS/CONNECT/resty)"
 bash "$SCRIPT_DIR/smoke-test.sh" "$STAGE/$INNER"
 
-# 冒烟会在包内 nginx/logs/ 留下日志, 打包前清掉
+# 冒烟与 nginx -t 会在包内留下运行时产物: logs/ 下的日志与
+# client_body_temp/proxy_temp/fastcgi_temp/uwsgi_temp/scgi_temp
+# 临时目录 (运行时自动重建, 不应打进发布包), 打包前清掉
 rm -f "$STAGE/$INNER/nginx/logs/"*.log 2>/dev/null || true
+rm -rf "$STAGE/$INNER/nginx/"*_temp 2>/dev/null || true
 
 # ---------- L2: 基准测试 ----------
 # ab 两场景吞吐, 结果写入 benchmark-<平台>-<架构>.txt (非门禁, 含残废检测)
@@ -423,6 +426,16 @@ bash "$SCRIPT_DIR/benchmark.sh" "$STAGE/$INNER"
 
 # ---------- 压缩包 ----------
 log "生成压缩包"
+# 防御断言: 包内不应残留运行时产物 (temp 目录 / 日志)
+if ls -d "$STAGE/$INNER/nginx/"*_temp >/dev/null 2>&1; then
+  echo "错误: 包内仍存在 *_temp 临时目录" >&2
+  ls -d "$STAGE/$INNER/nginx/"*_temp >&2
+  exit 1
+fi
+if ls "$STAGE/$INNER/nginx/logs/"*.log >/dev/null 2>&1; then
+  echo "错误: 包内仍存在运行日志" >&2
+  exit 1
+fi
 tar -C "$STAGE" -cJf "$DIST.tar.xz" "$INNER"
 sha256sum "$DIST.tar.xz" > "$DIST.tar.xz.sha256"
 
