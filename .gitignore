@@ -14,3 +14,6 @@ ngx_http_proxy_connect_module-*/
 *.zip.sha256
 # 本地跑基准产生的结果文件
 benchmark-*.txt
+
+# 源码包副本 (win 构建内部下载的预拷位置)
+*.tar.gz
