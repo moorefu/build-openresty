@@ -147,10 +147,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
-          # 不做 pacman -Syu 全量升级: 锁定 runner 预装工具链版本,
-          # 避免上游滚动更新引入的 MinGW gcc 挂死 (曾出现编译单文件中途
-          # 无输出 20+ 分钟); install 需要的包仍正常安装
-          update: false
+          update: true
           install: >-
             ${{ matrix.toolchain }}
             make
@@ -163,7 +160,15 @@ jobs:
             curl
             dos2unix
 
+      # 禁用 Windows 错误报告弹窗: CI 无交互, 进程崩溃时的 GUI 报错对话框
+      # 会令父进程永久等待, 表现为编译中途无输出挂死; 禁用后崩溃即时失败
+      - name: Disable Windows error dialogs
+        run: |
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Windows" /v ErrorMode /t REG_DWORD /d 2 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting" /v Disabled /t REG_DWORD /d 1 /f
+
       - name: Build with MSYS2
+        timeout-minutes: 45
         shell: msys2 {0}
         env:
           BIND_VERSION: ${{ needs.prepare.outputs.release_version }}
