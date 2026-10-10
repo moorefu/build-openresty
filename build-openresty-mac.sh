@@ -218,15 +218,22 @@ PKG="$STAGE/$INNER"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -a "install$PREFIX" "$PKG"
 
-# 1) 依赖 dylib 打进包内 lib/ (cp -P 保留符号链接链)
+# 1) 依赖 dylib 打进包内 lib/ (cp -P 保留符号链接链); 拷贝失败即中止
 mkdir -p "$PKG/lib"
 for libdir in "$DEPS/openssl/lib" "$DEPS/pcre2/lib" "$DEPS/zlib/lib"; do
-  cp -P "$libdir"/*.dylib "$PKG/lib/" 2>/dev/null || true
+  ls "$libdir"/*.dylib >/dev/null 2>&1 \
+    || { echo "错误: $libdir 下没有 dylib" >&2; exit 1; }
+  cp -P "$libdir"/*.dylib "$PKG/lib/"
 done
+find "$PKG/lib" -maxdepth 1 -name '*.dylib' -print -quit | grep -q . \
+  || { echo "错误: 包内 lib/ 为空" >&2; exit 1; }
 
-# 2) 包内 dylib 索引: basename -> 包内相对路径 (依赖改写按 basename 定位)
+# 2) 包内 dylib 索引: basename -> 包内相对路径 (依赖改写按 basename 定位)。
+#    符号链接也要收录: LuaJIT 安装的真实文件名带完整版本号
+#    (libluajit-5.1.2.1.ROLLING.dylib), 而 nginx 记录的依赖名是不带版本
+#    尾巴的 SONAME 链接 (libluajit-5.1.2.dylib), 改写须指向链接名
 IDX="$(mktemp /tmp/or-machoidx.XXXXXX)"
-find "$PKG" -type f -name '*.dylib' | while read -r f; do
+find "$PKG" \( -type f -o -type l \) -name '*.dylib' | while read -r f; do
   printf '%s\t%s\n' "${f##*/}" "${f#$PKG/}" >> "$IDX"
 done
 [ -s "$IDX" ] || { echo "错误: 包内未找到任何 dylib" >&2; exit 1; }
