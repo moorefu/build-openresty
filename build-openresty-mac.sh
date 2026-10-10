@@ -314,7 +314,8 @@ verify_macho() {
   rel="${f#$PKG/}"; dir="$(dirname "$rel")"
   for pat in "$DEPS" "$PREFIX" "$STAGE" "$SCRIPT_DIR/openresty-$VERSION" \
              /opt/homebrew /usr/local/opt /usr/local/Cellar; do
-    if otool -l "$f" 2>/dev/null | grep -F -q "$pat"; then
+    # tail +2: 跳过 otool 输出首行的文件名本身(位于打包暂存目录, 会自匹配)
+    if otool -l "$f" 2>/dev/null | tail -n +2 | grep -F -q "$pat"; then
       echo "错误: ${rel} 的 load commands 残留构建期路径 $pat" >&2
       bad=1
     fi
