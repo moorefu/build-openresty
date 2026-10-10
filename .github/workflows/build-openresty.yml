@@ -183,8 +183,44 @@ jobs:
             openresty-*-windows-${{ matrix.arch }}-msys2.zip
             openresty-*-windows-${{ matrix.arch }}-msys2.zip.sha256
 
+  build-macos:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          # macos-13 (Intel) 已于 2025-12 退役; macos-15-intel 是最后的
+          # Intel 镜像 (计划保留至 2027 年), 标准的 macos-15 即 arm64
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      MACOS_MIN: '11.0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build OpenResty (macOS)
+        env:
+          BIND_VERSION: ${{ needs.prepare.outputs.release_version }}
+          OS_VER: ${{ needs.prepare.outputs.openssl_version }}
+          PCRE_VER: ${{ needs.prepare.outputs.pcre_version }}
+          ZLIB_VER: ${{ needs.prepare.outputs.zlib_version }}
+        run: bash build-openresty-mac.sh "$BIND_VERSION" "$OS_VER" "$PCRE_VER" "$ZLIB_VER"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openresty-macos-${{ matrix.arch }}
+          path: |
+            openresty-*-macos-*-${{ matrix.arch }}-openssl-*.tar.xz
+            openresty-*-macos-*-${{ matrix.arch }}-openssl-*.tar.xz.sha256
+            benchmark-*.txt
+
   release:
-    needs: [prepare, build-linux, build-windows]
+    needs: [prepare, build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
 
     steps:
@@ -192,6 +228,7 @@ jobs:
         run: |
           echo "VERSION=${{ needs.prepare.outputs.release_version }}" >> $GITHUB_ENV
           echo "OS_VER=${{ needs.prepare.outputs.openssl_version }}" >> $GITHUB_ENV
+          echo "MACOS_MIN=11.0" >> $GITHUB_ENV
 
       - uses: actions/download-artifact@v4
 
@@ -226,3 +263,7 @@ jobs:
             openresty-windows-x86_64/openresty-${{ env.VERSION }}-windows-x86_64-msys2.zip.sha256
             openresty-windows-x86/openresty-${{ env.VERSION }}-windows-x86-msys2.zip
             openresty-windows-x86/openresty-${{ env.VERSION }}-windows-x86-msys2.zip.sha256
+            openresty-macos-arm64/openresty-${{ env.VERSION }}-macos-${{ env.MACOS_MIN }}-arm64-openssl-${{ env.OS_VER }}.tar.xz
+            openresty-macos-arm64/openresty-${{ env.VERSION }}-macos-${{ env.MACOS_MIN }}-arm64-openssl-${{ env.OS_VER }}.tar.xz.sha256
+            openresty-macos-x86_64/openresty-${{ env.VERSION }}-macos-${{ env.MACOS_MIN }}-x86_64-openssl-${{ env.OS_VER }}.tar.xz
+            openresty-macos-x86_64/openresty-${{ env.VERSION }}-macos-${{ env.MACOS_MIN }}-x86_64-openssl-${{ env.OS_VER }}.tar.xz.sha256

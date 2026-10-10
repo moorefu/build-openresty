@@ -25,15 +25,27 @@ NGINX="$ROOT/bin/openresty"
 MIN_RPS=500
 PORT=12421
 DUR=10          # 每场景压测秒数
-NPROC=$(nproc)
+if command -v nproc >/dev/null 2>&1; then NPROC=$(nproc)
+else NPROC=$(sysctl -n hw.ncpu); fi   # macOS 无 nproc
 
 log() { echo "==> $*" >&2; }
 
-command -v ab >/dev/null 2>&1 || {
-  log "安装 httpd-tools (ab)"
-  yum install -y httpd-tools
-}
-command -v ab >/dev/null 2>&1 || { echo "错误: 找不到 ab" >&2; exit 1; }
+if ! command -v ab >/dev/null 2>&1; then
+  log "安装 ab"
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y httpd-tools
+  elif command -v brew >/dev/null 2>&1; then
+    # httpd 为 keg-only 时 ab 不在 PATH, 后面再从 opt 路径找
+    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install httpd
+  fi
+fi
+AB_BIN="$(command -v ab || true)"
+if [ -z "$AB_BIN" ]; then
+  for c in /opt/homebrew/opt/httpd/bin/ab /usr/local/opt/httpd/bin/ab; do
+    if [ -x "$c" ]; then AB_BIN="$c"; break; fi
+  done
+fi
+[ -n "$AB_BIN" ] || { echo "错误: 找不到 ab" >&2; exit 1; }
 
 PY="$(command -v python3 || command -v python || true)"
 if [ -z "$PY" ]; then
@@ -90,7 +102,7 @@ run_scenario() {
   local name="$1" path="$2" rps
   log "场景 $name (${DUR}s)"
   # -k keepalive; ab 在时限结束后输出统计
-  ab -q -k -t "$DUR" -c 8 "http://127.0.0.1:$PORT$path" > "$WORK/ab.out" 2>/dev/null || true
+  "$AB_BIN" -q -k -t "$DUR" -c 8 "http://127.0.0.1:$PORT$path" > "$WORK/ab.out" 2>/dev/null || true
   rps="$(sed -n 's/^Requests per second:    \([0-9.]*\).*/\1/p' "$WORK/ab.out" | head -1)"
   [ -n "$rps" ] || { echo "错误: ab 未输出 RPS ($name)" >&2; exit 1; }
   echo "$name: $rps req/s" >&2

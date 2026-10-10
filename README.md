@@ -7,6 +7,10 @@
   nginx 与 luajit 解释器的 rpath 用 patchelf 改写为 `$ORIGIN` 相对路径（相对
   可执行文件自身位置，不依赖系统安装），目标机器只需 glibc >= 2.17，无需安装
   任何依赖库。OpenSSL 3.5 引入的 `libcrypt.so.2` 依赖同样随包分发在 `lib/`。
+- **macOS**：在 GitHub Actions 的 macOS 15 runner（arm64 / Intel x86_64）上原生
+  构建，链接基线 macOS 11.0。依赖库同样以动态链接随包分发（`dylib` 位于包内
+  `lib/` 与 `luajit/lib/`），依赖引用用 `install_name_tool` 改写为
+  `@loader_path` 相对路径（与 Linux 的 `$ORIGIN` 等价），解压即用。
 - **Windows**：委托 OpenResty 官方 `util/build-win32.sh` 构建（MSYS2 工具链，
   与上游测试过的 Windows 配置一致），编译期 prefix 为空，nginx 以当前目录为
   prefix 运行，天然便携。
@@ -23,6 +27,8 @@
 | --- | --- | --- |
 | Linux x86_64 | `openresty-<版本>-linux-glibc2.17-x86_64-openssl-<SSL版本>.tar.xz` | LuaJIT 动态库随包，rpath 定位 |
 | Linux aarch64 | `openresty-<版本>-linux-glibc2.17-aarch64-openssl-<SSL版本>.tar.xz` | LuaJIT 动态库随包，rpath 定位 |
+| macOS arm64 | `openresty-<版本>-macos-11.0-arm64-openssl-<SSL版本>.tar.xz` | dylib 随包，@loader_path 定位，macOS >= 11.0 |
+| macOS x86_64 | `openresty-<版本>-macos-11.0-x86_64-openssl-<SSL版本>.tar.xz` | dylib 随包，@loader_path 定位，macOS >= 11.0 |
 | Windows x86_64 | `openresty-<版本>-windows-x86_64-msys2.zip` | 官方 win 构建配置，解压即用 |
 
 每个压缩包均附带同名 `.sha256` 校验文件。Linux 包内顶层目录为纯版本名
@@ -46,7 +52,7 @@ openresty-<版本>/
 tar -xJf openresty-1.31.1.1-linux-glibc2.17-x86_64-openssl-3.5.6.tar.xz
 cd openresty-1.31.1.1
 ./bin/openresty                # 以包内 nginx/ 为 prefix 启动
-curl http://127.0.0.1:8080/    # 默认 conf 监听 8080
+curl http://127.0.0.1:80/      # 默认 conf 监听 80
 ```
 
 `bin/openresty` 是便携 wrapper：按脚本自身位置定位包根并传 `-p`，
@@ -78,6 +84,22 @@ server {
 ```
 
 客户端即可经 `curl -x http://127.0.0.1:3128 https://目标` 建立隧道。
+
+### macOS
+
+```bash
+tar -xJf openresty-1.31.1.1-macos-11.0-arm64-openssl-3.5.6.tar.xz
+cd openresty-1.31.1.1
+./bin/openresty                # 以包内 nginx/ 为 prefix 启动
+```
+
+- 包要求 macOS >= 11.0；arm64 包用于 Apple Silicon，x86_64 包用于 Intel 机型
+  （在 Apple Silicon 上也可经 Rosetta 运行，但建议用 arm64 包）；
+- 默认 conf 监听 80 端口，非 root 无法绑定：用 `sudo ./bin/openresty` 启动，
+  或改 `nginx/conf/nginx.conf` 的 `listen` 端口；
+- 若用"访达"等 GUI 方式解压后运行被 Gatekeeper 拦截，执行
+  `xattr -dr com.apple.quarantine <包目录>` 清除隔离扩展属性（命令行
+  `tar` 解压不会产生该问题）。
 
 ### Windows
 
@@ -118,9 +140,25 @@ docker run --rm -v "$(pwd)":/work -w /work \
 下载对应架构的二进制（glibc 2.17 可运行），再不行则源码编译兜底。
 `httpd-tools`（ab）为 L2 基准依赖，脚本内自动安装。
 
+### macOS（原生）
+
+在装有 Xcode Command Line Tools 的 macOS 11+ 上直接运行（arm64 / Intel 均可，
+架构跟随当前机器）：
+
+```bash
+bash build-openresty-mac.sh 1.31.1.1
+```
+
+参数与 Linux 版一致（无第 5 位架构参数）。脚本要求 `MACOSX_DEPLOYMENT_TARGET`
+（默认 11.0，可用环境变量 `MACOS_MIN` 覆盖，同时决定产物文件名中的基线标识）。
+便携化手段为 `install_name_tool`：包内 dylib 的 install id 与所有 Mach-O 的
+依赖引用统一改写为 `@loader_path` 相对路径、删除绝对路径 rpath，并对改写过的
+二进制重新 ad-hoc 签名（arm64 必需）。CI 上对应 GitHub Actions 的
+`macos-15`（arm64）与 `macos-15-intel`（x86_64，最后的 Intel 镜像）runner。
+
 ### 为什么解压到任意目录都能直接运行
 
-产物不依赖任何安装步骤或补丁脚本，机制如下：
+产物不依赖任何安装步骤或补丁脚本，机制如下（Linux）：
 
 - `nginx/sbin/nginx` 的 rpath 为 `$ORIGIN/../../lib:$ORIGIN/../../luajit/lib`——
   `$ORIGIN` 由 ELF 动态加载器在**运行时**解析为可执行文件自身所在目录，因此
@@ -135,6 +173,19 @@ docker run --rm -v "$(pwd)":/work -w /work \
 - patchelf 只在**构建机**上运行一次（打包期改写 rpath），不随包分发，用户侧
   无任何工具要求。每次构建打包后自动做解压场景验证（解包到任意临时目录 +
   清空 `LD_LIBRARY_PATH` 跑全套冒烟）持续保障这一特性。
+
+macOS 版机制对应（`@loader_path` = dyld 运行时解析的"引用者自身所在目录"，
+与 `$ORIGIN` 等价）：
+
+- 包内每个 dylib 的 install id 改为 `@loader_path/<名字>`；
+- nginx / luajit 解释器 / 各 dylib 对包内库的依赖引用全部改写为
+  `@loader_path/<相对路径>`（构建期这些引用是 `$DEPS` 绝对路径，或 OpenResty
+  给 LuaJIT 传 `PREFIX=./luajit` 产生的相对 install_name，dyld 按 CWD 解析
+  必然失效）；
+- 删除链接期残留的绝对路径 rpath，改写后的二进制重新 ad-hoc 签名；
+- 验证同样有解压场景门禁：load commands 不得残留构建期路径，依赖只允许
+  系统库（`/System`、`/usr/lib`）与可解析到包内文件的 `@loader_path` 引用，
+  且部署基线（minos）不得高于发布基线。
 
 ### Windows（MSYS2）
 
@@ -176,8 +227,9 @@ L2 的吞吐数字来自共享 CI runner，波动较大，不作发布门槛；�
 - **手动触发**（workflow_dispatch）：在 Actions 页面运行，填写参数即可。
 - **被其他工作流调用**（workflow_call）：作为可复用构建发布流程。
 
-构建矩阵为 Linux x86_64 + Linux aarch64 + Windows x86_64/x86，全部通过后自动
-创建 GitHub Release（tag 为 OpenResty 版本号）并上传全部产物与校验文件。
+构建矩阵为 Linux x86_64 + Linux aarch64 + macOS arm64 + macOS x86_64（Intel）
++ Windows x86_64/x86，全部通过后自动创建 GitHub Release（tag 为 OpenResty
+版本号）并上传全部产物与校验文件。
 可通过 `make_latest` / `prerelease` 输入控制 Release 标记。
 
 ## 便携补丁说明
@@ -218,6 +270,7 @@ OpenResty 的 configure 会把 resty 脚本的 `my $nginx_path;` patch 成硬编
 .
 ├── .github/workflows/build-openresty.yml  # CI：多平台构建 + 三层验证 + 自动发布 Release
 ├── build-openresty.sh                     # Linux 构建脚本（manylinux2014 容器内运行）
+├── build-openresty-mac.sh                 # macOS 构建脚本（原生运行，install_name_tool 便携化）
 ├── build-openresty-win.sh                 # Windows 构建脚本（MSYS2 环境运行，官方构建流程 + 环境适配）
 ├── ci-fix-yum-repos.sh                    # CentOS 7 EOL 后的 yum 换源（容器内先于构建运行）
 ├── smoke-test.sh                          # L1 冒烟编排：起多配置实例做 HTTP 级断言
