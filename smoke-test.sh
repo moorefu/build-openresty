@@ -122,7 +122,12 @@ log "版本检查"
 DEF_CONF=""
 if ! "$PY" -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $P_DEF)); s.close()" 2>/dev/null; then
   P_DEF=18080
-  sed -E "s/^([[:space:]]*listen[[:space:]]+)80;/\1$P_DEF;/" \
+  # 除改监听端口外, 还须把相对 include (如 mime.types) 重写为绝对路径:
+  # -c 指定外部 conf 后 conf-prefix 随之变为该 conf 所在目录, 相对 include
+  # 会解析到临时目录下而找不到文件
+  sed -E \
+    -e "s/^([[:space:]]*listen[[:space:]]+)80;/\1$P_DEF;/" \
+    -e "s|^([[:space:]]*include[[:space:]]+)([^/[:space:]][^;]*;)|\1$ROOT/nginx/conf/\2|" \
     "$ROOT/nginx/conf/nginx.conf" > "$WORK/nginx-def.conf"
   grep -qE "^[[:space:]]*listen[[:space:]]+$P_DEF;" "$WORK/nginx-def.conf" \
     || { echo "错误: 默认 conf 监听端口改写失败" >&2; exit 1; }
