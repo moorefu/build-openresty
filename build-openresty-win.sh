@@ -11,6 +11,7 @@ set -e
 # 输出, 本地无法复现), 因此构建主体包了输出停滞看门狗 + 整体重试:
 #   - run_with_watchdog: 后台跑命令, 日志停滞 >6 分钟即 taskkill 整个
 #     进程树并按失败处理(增量回显日志保持 CI 可观测)
+#   - 依赖源码包下载带 gzip 完整性校验与重试, 避免半截包被后续尝试复用
 #   - 失败自动清理源码树从头重试, 最多 3 次
 # 打包后自动做解包冒烟(静态 + Lua, 验证 nginx.exe/LuaJIT 可用)。
 
@@ -49,17 +50,31 @@ mkdir -p "$CACHE_DIR"
 
 log() { echo "==> $*"; }
 
+# 下载并校验 gzip 完整性: wget 中断会留下半截文件, 只判断文件是否存在
+# 会把半截包当成"已下载", 后续 tar 解包必然失败。
 download() {
   local url="$1"
   local out="${2:-$(basename "$url")}"
   local cache_file="$CACHE_DIR/$out"
-  if [ -f "$cache_file" ]; then
+  local i
+  if [ -s "$cache_file" ] && gzip -t "$cache_file" 2>/dev/null; then
     echo "==> Cache hit: $cache_file"
     cp "$cache_file" "$out"
-  else
-    echo "==> Downloading $url"
-    wget -q --show-progress "$url" -O "$cache_file" && cp "$cache_file" "$out"
+    return 0
   fi
+  rm -f "$cache_file"
+  for i in 1 2 3 4 5; do
+    echo "==> Downloading $url (尝试 $i/5)"
+    if wget -q --show-progress --tries=3 --timeout=60 --retry-connrefused \
+        "$url" -O "$cache_file" && gzip -t "$cache_file" 2>/dev/null; then
+      cp "$cache_file" "$out"
+      return 0
+    fi
+    rm -f "$cache_file"
+    [ "$i" -lt 5 ] && sleep 2
+  done
+  echo "ERROR: 下载失败或文件损坏: $url" >&2
+  return 1
 }
 
 # Check prerequisites
@@ -169,6 +184,25 @@ EOF
   perl -i -pe 'if (/^make -j\$JOBS/) {
       $_ = "bash win-patch-apply.sh || exit 1\n" . $_;
   }' util/build-win32.sh
+
+  # 依赖预下载: 上游 util/build-win32.sh 只在文件不存在时下载, 而 wget
+  # 中断会留下半截 tarball。半截文件一旦存在, 后续每次重试都会跳过下载,
+  # 直接 tar 解包失败(CI 2026-11-16 的 x86 job 即此原因)。这里按上游
+  # 声明的版本提前下载, 带 gzip 完整性校验与重试, 保证交给上游的是完整包。
+  local dep_ssl dep_pcre dep_zlib
+  dep_ssl="$(sed -n 's/^OPENSSL=//p' util/build-win32.sh | head -1)"
+  dep_pcre="$(sed -n 's/^PCRE=//p' util/build-win32.sh | head -1)"
+  dep_zlib="$(sed -n 's/^ZLIB=//p' util/build-win32.sh | head -1)"
+  if [ -n "$dep_ssl" ] && [ -n "$dep_pcre" ] && [ -n "$dep_zlib" ]; then
+    (
+      cd .. &&
+      download "https://github.com/openssl/openssl/releases/download/${dep_ssl}/${dep_ssl}.tar.gz" &&
+      download "https://github.com/PCRE2Project/pcre2/releases/download/${dep_pcre}/${dep_pcre}.tar.gz" &&
+      download "https://github.com/madler/zlib/releases/download/v${dep_zlib#zlib-}/${dep_zlib}.tar.gz"
+    ) || return 1
+  else
+    echo "WARN: 无法解析 util/build-win32.sh 的依赖版本, 回退到上游下载" >&2
+  fi
 
   log "Running util/build-win32.sh (watchdog: 6min idle kill)"
   run_with_watchdog 360 bash util/build-win32.sh

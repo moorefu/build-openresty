@@ -12,11 +12,11 @@ on:
       openssl_version:
         required: false
         type: string
-        default: '3.5.6'
+        default: '3.5.9'
       pcre_version:
         required: false
         type: string
-        default: '10.47'
+        default: '10.49'
       zlib_version:
         required: false
         type: string
@@ -43,12 +43,12 @@ on:
         description: 'OpenSSL version'
         required: false
         type: string
-        default: '3.5.6'
+        default: '3.5.9'
       pcre_version:
         description: 'PCRE version'
         required: false
         type: string
-        default: '10.47'
+        default: '10.49'
       zlib_version:
         description: 'zlib version'
         required: false
