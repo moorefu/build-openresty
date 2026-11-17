@@ -67,8 +67,9 @@ curl http://127.0.0.1:8080/    # 默认 conf 监听 8080
 > 修改 `nginx/conf/nginx.conf` 的 `listen` 并用 `sudo` 启动。Debian/Ubuntu 以 root 启动时，wrapper 会自动
 > 探测 `nobody`/`nogroup` 组并把 `user nobody nogroup;` 合并进 `-g`
 > （nginx 编译期默认是 `nobody:nobody`，而 Debian 系只有 `nogroup` 组），
-> 含 `-g 'daemon off;'` 的容器启动姿势同样生效；自定义 conf 若已显式写 `user`，
-> 需要同时给出目标系统存在的组名。
+> 含 `-g 'daemon off;'` 的容器启动姿势同样生效；若 `-g` 或自定义 conf 已显式写
+> `user`，wrapper 不会重复注入，此时调用方需要自己给出目标系统存在的组名
+> （如 `-g 'user www-data www-data;'`）。
 >
 > 直接调 `./nginx/sbin/nginx` 需显式指定 prefix（`-p "$PWD/nginx/"`）：
 > nginx 编译进二进制的默认 prefix 是构建期的 `/usr/local/openresty`，
@@ -316,7 +317,8 @@ OpenResty 的 configure 会把 resty 脚本的 `my $nginx_path;` patch 成硬编
    `lualib/`、`site/lualib/`、`luajit/lib/`）；
 3. 以 root 运行且系统没有 `nobody` 组时（Debian/Ubuntu），把
    `user nobody nogroup;` 合并进 resty 传给 nginx 的 `-g`，避免
-   `getgrnam("nobody")` 失败（与 bin/openresty wrapper 同一套探测逻辑）。
+   `getgrnam("nobody")` 失败（与 bin/openresty wrapper 同一套探测逻辑）；
+   生成的 conf（含 `--main-conf`）已设置 `user` 时跳过注入，避免 duplicate。
 
 此外还有两处打包期改写（非源码补丁，见 build-openresty.sh 注释）：
 

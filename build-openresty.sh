@@ -330,7 +330,7 @@ or_root=$(cd "$(dirname "$0")/.." && pwd)
 # nginx 编译期默认 user/group 是 nobody:nobody; euid==0 且 conf 未指定
 # user 时会 getgrnam("nobody")。Debian/Ubuntu 只有 nogroup 组, 启动即失败。
 # 这里按目标系统探测, 把 user 指令合并进调用方的 -g (nginx 只保留最后
-# 一个 -g, 不能简单追加), conf 已显式设置 user 时不动。
+# 一个 -g, 不能简单追加); -g 或 conf 已显式设置 user 时不动。
 has_group() {
     getent group "$1" >/dev/null 2>&1 && return 0
     grep -q "^$1:" /etc/group 2>/dev/null
@@ -345,16 +345,25 @@ if [ "$(id -u)" = "0" ] && ! has_group nobody && has_group nogroup; then
     prefix="$or_root/nginx/"
     conf=""
     has_g=""
+    g_has_user=""
     pending=""
+    # 匹配 -g 值中已有的 user 指令 (行首或分号后); 用户显式设置时不再注入,
+    # 否则同一 main 上下文出现两条 user 指令会报 duplicate
+    user_re='(^|;)[[:space:]]*user[[:space:]]'
     for arg in "$@"; do
         case "$pending" in
             p) prefix="$arg"; pending=""; continue ;;
             c) conf="$arg"; pending=""; continue ;;
-            g) pending=""; continue ;;
+            g)
+                printf '%s\n' "$arg" | grep -qE "$user_re" && g_has_user=1
+                pending=""; continue ;;
         esac
         case "$arg" in
             -g) has_g=1; pending="g" ;;
-            -g?*) has_g=1 ;;
+            -g?*)
+                has_g=1
+                printf '%s\n' "${arg#-g}" | grep -qE "$user_re" && g_has_user=1
+                ;;
             -p) pending="p" ;;
             -c) pending="c" ;;
             -p?*) prefix="${arg#-p}" ;;
@@ -368,7 +377,8 @@ if [ "$(id -u)" = "0" ] && ! has_group nobody && has_group nogroup; then
         *) conf="$prefix/$conf" ;;
     esac
 
-    if ! grep -qE '^[[:space:]]*user[[:space:]]' "$conf" 2>/dev/null; then
+    if [ -z "$g_has_user" ] && \
+       ! grep -qE '^[[:space:]]*user[[:space:]]' "$conf" 2>/dev/null; then
         if [ -n "$has_g" ]; then
             # 把 user 指令合并进已有 -g 值, 其余参数原样重建
             newargs=""
@@ -500,7 +510,8 @@ OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
 
 Debian/Ubuntu 以 root 启动时, wrapper 会自动探测组名并注入
 "user nobody nogroup;" (Debian 系没有 nobody 组, 编译期默认是 nobody:nobody);
-若自定义 conf 里已显式设置 user, 需要同时给出组名 (如 user nobody nogroup;).
+若 -g 或自定义 conf 里已显式设置 user, wrapper 不会重复注入,
+需要同时给出组名 (如 -g 'user www-data www-data;').
 
 直接调 nginx 二进制需显式指定 prefix:
   ./nginx/sbin/nginx -p \$PWD/nginx/

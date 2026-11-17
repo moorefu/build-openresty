@@ -260,14 +260,14 @@ PKG_DIR=$(basename "${ZIPFILE%.zip}")
 cat > "$PKG_DIR/start.bat" <<'EOF'
 @echo off
 cd /d "%~dp0"
-nginx.exe -p . %*
+"%~dp0nginx.exe" -p . %*
 EOF
 cat > "$PKG_DIR/README.txt" <<EOF
 OpenResty $VERSION 便携版 (Windows $ARCH, MSYS2)
 
 运行 (nginx 以当前目录为 prefix, 必须先 cd 到本包根目录):
   start.bat          # 自动切到本目录后启动
-  nginx.exe -p .     # 或在包根目录手动运行
+  .\nginx.exe -p .   # 或在包根目录手动运行
 
 - 默认 conf 监听 8080 端口
 - resty.bat / resty 是 Perl 脚本, 需要系统安装 Perl (如 Strawberry Perl)
