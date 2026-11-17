@@ -107,7 +107,7 @@ http_get() {
 # 自定义 conf 的 Lua 搜索路径: 显式指向包内 (验证动态库/lua 库本身,
 # 不依赖默认 conf 的注入)
 LUA_PATH_CONF="lua_package_path \"$ROOT/lualib/?.lua;$ROOT/site/lualib/?.lua;;\";
-  lua_package_cpath \"$ROOT/luajit/lib/?.so;;\";"
+  lua_package_cpath \"$ROOT/lualib/?.so;$ROOT/luajit/lib/?.so;;\";"
 
 log "版本检查"
 "$NGINX" -V 2>&1 | tail -1
@@ -152,6 +152,49 @@ fi
 "$NGINX" -p "$ROOT/nginx/" -s quit
 log "默认 conf 实例已正常退出"
 
+# ---------- 默认 conf 的 cpath: 加载 lualib/ 下的 C 模块 (cjson) ----------
+# 复制包内默认 conf, 只改监听端口并追加一个 server (不改 lua_package_* 行),
+# 验证 cpath 能按 $prefix 相对路径从 lualib/ 加载 cjson。只测 resty.core
+# 无法覆盖这一点: 装了 OpenResty 的机器上 ";;" 会兜底到编译期绝对路径而
+# 掩盖缺陷。
+P_CPATH=12415
+P_CPATH_MAIN=12416
+cat > "$WORK/cpath.conf" <<EOF
+server {
+    listen 127.0.0.1:$P_CPATH;
+    location = /cjson {
+        default_type text/plain;
+        content_by_lua_block {
+            local cjson = require "cjson"
+            ngx.print(cjson.encode({ok = true}))
+        }
+    }
+}
+EOF
+sed -E \
+  -e "s/^([[:space:]]*listen[[:space:]]+)80;/\1$P_CPATH_MAIN;/" \
+  -e "s|^([[:space:]]*include[[:space:]]+)([^/[:space:]][^;]*;)|\1$ROOT/nginx/conf/\2|" \
+  "$ROOT/nginx/conf/nginx.conf" > "$WORK/nginx-cpath.conf"
+grep -qE "^[[:space:]]*listen[[:space:]]+$P_CPATH_MAIN;" "$WORK/nginx-cpath.conf" \
+  || { echo "错误: cpath 测试 conf 监听端口改写失败" >&2; exit 1; }
+# 在 http 块开头插入 include (awk 的 a\ 语义在 BSD/GNU 下一致)
+awk -v inc="$WORK/cpath.conf" '
+  /^http \{/ && !done { print; printf "    include %s;\n", inc; done=1; next }
+  { print }' "$WORK/nginx-cpath.conf" > "$WORK/nginx-cpath.conf.new" \
+  && mv "$WORK/nginx-cpath.conf.new" "$WORK/nginx-cpath.conf"
+log "冒烟: 默认 conf 的 lua_package_cpath (cjson)"
+rm -f "$ROOT/nginx/logs/error.log"
+"$NGINX" -p "$ROOT/nginx/" -c "$WORK/nginx-cpath.conf"
+if ! wait_port "$P_CPATH"; then
+  echo "----- 错误日志 ($ROOT/nginx/logs/error.log) -----" >&2
+  cat "$ROOT/nginx/logs/error.log" >&2 || true
+  exit 1
+fi
+body="$(http_get "http://127.0.0.1:$P_CPATH/cjson")"
+[ "$body" = '{"ok":true}' ] || { echo "错误: 默认 conf 下 cjson 不可用: $body" >&2; exit 1; }
+"$NGINX" -p "$ROOT/nginx/" -s quit
+log "默认 conf cpath 验证通过"
+
 # ---------- 静态实例: 首页 + stub_status ----------
 start_nginx static "$P_HTTP" 'location / { root html; }
     location = /status { stub_status; }'
@@ -161,12 +204,15 @@ body="$(http_get "http://127.0.0.1:$P_HTTP/")"
 http_get "http://127.0.0.1:$P_HTTP/status" | grep -q 'Active connections:' \
   || { echo "错误: stub_status 输出异常" >&2; exit 1; }
 
-# ---------- Lua 实例: content_by_lua (验证 LuaJIT 动态库) ----------
+# ---------- Lua 实例: content_by_lua (验证 LuaJIT 动态库 + lualib C 模块) ----------
 start_nginx lua "$P_LUA" 'default_type text/plain;
-    location = /hello { content_by_lua_block { ngx.print("hello-lua-" .. 21 * 2) } }'
-log "冒烟: Lua content_by_lua"
+    location = /hello { content_by_lua_block { ngx.print("hello-lua-" .. 21 * 2) } }
+    location = /cjson { content_by_lua_block { local cjson = require "cjson"; ngx.print(cjson.encode({ok = true})) } }'
+log "冒烟: Lua content_by_lua + cjson"
 body="$(http_get "http://127.0.0.1:$P_LUA/hello")"
 [ "$body" = "hello-lua-42" ] || { echo "错误: Lua 输出不符: $body" >&2; exit 1; }
+body="$(http_get "http://127.0.0.1:$P_LUA/cjson")"
+[ "$body" = '{"ok":true}' ] || { echo "错误: lualib 下 cjson 不可用: $body" >&2; exit 1; }
 
 # ---------- TLS 实例 ----------
 TLSDIR="$WORK/tls"

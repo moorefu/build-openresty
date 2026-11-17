@@ -125,6 +125,53 @@ jobs:
             openresty-*-linux-glibc2.17-${{ matrix.arch }}-openssl-*.tar.xz.sha256
             benchmark-*.txt
 
+  # 目标发行版冒烟: 构建机是 CentOS 系 manylinux(root, 有 nobody 组), 天然
+  # 覆盖不到 Debian/Ubuntu 的差异 (无 nobody 组) 和"干净机器上没有
+  # /usr/local/openresty/lualib"的 cpath 缺陷。这里对发布产物做真机矩阵,
+  # 失败即阻断 release。
+  smoke-distros:
+    needs: [prepare, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - centos:7
+          - rockylinux:9-minimal
+          - debian:11-slim
+          - debian:12-slim
+          - ubuntu:20.04
+          - ubuntu:24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openresty-linux-x86_64
+
+      - name: Extract package
+        run: tar -xJf openresty-*-linux-glibc2.17-x86_64-openssl-*.tar.xz
+
+      - name: Smoke test in ${{ matrix.image }} (root)
+        env:
+          IMAGE: ${{ matrix.image }}
+          OR_VERSION: ${{ needs.prepare.outputs.release_version }}
+        run: |
+          # Docker Hub 匿名拉取偶发限流/超时, 先带重试拉取镜像
+          for i in 1 2 3; do
+            docker pull "$IMAGE" && break
+            echo "拉取 $IMAGE 失败 (第 $i 次), 重试..."
+            sleep 10
+          done
+          docker run --rm \
+            -e OR_VERSION \
+            -v "$PWD":/w -w /w \
+            "$IMAGE" \
+            bash -c 'cp -a "/w/openresty-$OR_VERSION" /opt/or && bash /w/ci-smoke-distro.sh /opt/or'
+
   build-windows:
     needs: prepare
     strategy:
@@ -220,7 +267,7 @@ jobs:
             benchmark-*.txt
 
   release:
-    needs: [prepare, build-linux, build-windows, build-macos]
+    needs: [prepare, build-linux, build-windows, build-macos, smoke-distros]
     runs-on: ubuntu-latest
 
     steps:

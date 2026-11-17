@@ -370,7 +370,7 @@ chmod 755 "$PKG/bin/openresty"
 
 # 5) 默认 nginx.conf 注入 lua 模块搜索路径 ($prefix 相对形式, 同 Linux 版)。
 #    不用 sed -i (BSD/GNU 语法不同, BSD 也不解释 a\ 文本中的 \n), 用 awk 重写
-INJ='lua_package_path "$prefix/../lualib/?.lua;$prefix/../site/lualib/?.lua;;";\n    lua_package_cpath "$prefix/../luajit/lib/?.so;;";'
+INJ='lua_package_path "$prefix/../lualib/?.lua;$prefix/../site/lualib/?.lua;;";\n    lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;";'
 for conf in nginx.conf nginx.conf.default; do
   awk -v inj="$INJ" '/^http \{/ && !done { print; printf "    %s\n", inj; done=1; next } { print }' \
     "$PKG/nginx/conf/$conf" > "$PKG/nginx/conf/$conf.new" \
@@ -378,6 +378,9 @@ for conf in nginx.conf nginx.conf.default; do
 done
 grep -q 'lua_package_path' "$PKG/nginx/conf/nginx.conf" || {
   echo "错误: 默认 conf 注入 lua_package_path 失败" >&2; exit 1; }
+grep -Fq 'lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;";' \
+  "$PKG/nginx/conf/nginx.conf" || {
+  echo "错误: 默认 conf 注入 lua_package_cpath 失败" >&2; exit 1; }
 
 # bin/ 下脚本不应引用构建期绝对前缀
 if grep -rl "$PREFIX" "$PKG/bin/" >/dev/null 2>&1; then
@@ -396,9 +399,11 @@ OpenResty $VERSION 便携版 (macOS $ARCH, macOS >= $MACOS_MIN)
     路径 (按可执行文件自身位置定位, 不依赖系统安装)
   - 内置 ngx_http_proxy_connect_module (HTTP CONNECT 正向代理)
   - 默认 conf 监听 80 端口, 非 root 无法绑定: 用 sudo 启动或改 listen 端口
+  - bin/resty、bin/opm 是 Perl 脚本, 运行需要系统 Perl (macOS 自带即可)
 
 基本用法 (推荐, 自动定位包内 nginx/ 为 prefix):
   ./bin/openresty                     # 启动 (默认 conf 监听 80)
+  sudo ./bin/openresty                # 非 root 无法绑定 80 时用 sudo
   ./bin/openresty -s reload|quit|stop # 信号控制
   ./bin/resty -e 'print("hello")'     # LuaJIT/resty CLI
 

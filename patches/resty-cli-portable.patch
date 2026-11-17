@@ -8,7 +8,7 @@
 +my $nginx_path;
 
  my $WNOHANG = 1;
-@@ -546,7 +546,13 @@
+@@ -546,7 +546,14 @@
      exec $cmd or die "Failed to run command \"$cmd\": $!\n";
  }
 
@@ -19,7 +19,25 @@
 +my $or_root = File::Spec->catdir($FindBin::RealBin, "..");
 +my $lua_package_path_config = "    lua_package_path \""
 +    . $or_root . "/lualib/?.lua;" . $or_root . "/site/lualib/?.lua;;\";\n"
-+    . "    lua_package_cpath \"" . $or_root . "/luajit/lib/?.so;;\";\n";
++    . "    lua_package_cpath \"" . $or_root . "/lualib/?.so;"
++    . $or_root . "/luajit/lib/?.so;;\";\n";
  if (@inc_dirs) {
      my $package_path = "";
      my $package_path2 = "";
+@@ -982,8 +989,14 @@
+ }
+
+ $label =~ s/[\r\n]//g;
+-my @cmd = ($nginx_path,
+-           '-g', '# ' . $label,
++my $global_opts = '# ' . $label;
++# 便携改动: Debian/Ubuntu 没有 nobody 组, 以 root 运行时 nginx 会在
++# getgrnam("nobody") 处失败 (与 bin/openresty wrapper 相同的探测逻辑)
++if ($> == 0 && !getgrnam('nobody') && getgrnam('nogroup')) {
++    $global_opts = "user nobody nogroup; $global_opts";
++}
++my @cmd = ($nginx_path,
++           '-g', $global_opts,
+            '-p', "$prefix_dir/", '-c', "conf/nginx.conf");
+
+ if ($use_gdb) {

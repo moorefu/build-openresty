@@ -5,8 +5,9 @@
 - **Linux**：在 manylinux2014（glibc 2.17 基线）容器内构建。OpenSSL / PCRE2 / zlib /
   LuaJIT 以**动态链接**方式随包分发（`.so` 位于包内 `lib/` 与 `luajit/lib/`），
   nginx 与 luajit 解释器的 rpath 用 patchelf 改写为 `$ORIGIN` 相对路径（相对
-  可执行文件自身位置，不依赖系统安装），目标机器只需 glibc >= 2.17，无需安装
-  任何依赖库。OpenSSL 3.5 引入的 `libcrypt.so.2` 依赖同样随包分发在 `lib/`。
+  可执行文件自身位置，不依赖系统安装），目标机器只需 glibc >= 2.17 与系统自带
+  的 `libgcc_s`，无需安装任何依赖库（不支持 Alpine 等 musl 系统）。OpenSSL 3.5
+  引入的 `libcrypt.so.2` 依赖同样随包分发在 `lib/`。
 - **macOS**：在 GitHub Actions 的 macOS 15 runner（arm64 / Intel x86_64）上原生
   构建，链接基线 macOS 11.0。依赖库同样以动态链接随包分发（`dylib` 位于包内
   `lib/` 与 `luajit/lib/`），依赖引用用 `install_name_tool` 改写为
@@ -59,6 +60,13 @@ curl http://127.0.0.1:80/      # 默认 conf 监听 80
 任意解压位置、任意调用姿势（含符号链接）下 conf/logs/temp 路径都正确。
 信号控制同样走 wrapper：`./bin/openresty -s reload|quit|stop`。
 
+> 默认 conf 监听 80 端口，普通用户无法绑定：用 `sudo ./bin/openresty` 启动，或修改
+> `nginx/conf/nginx.conf` 的 `listen`。Debian/Ubuntu 以 root 启动时，wrapper 会自动
+> 探测 `nobody`/`nogroup` 组并把 `user nobody nogroup;` 合并进 `-g`
+> （nginx 编译期默认是 `nobody:nobody`，而 Debian 系只有 `nogroup` 组），
+> 含 `-g 'daemon off;'` 的容器启动姿势同样生效；自定义 conf 若已显式写 `user`，
+> 需要同时给出目标系统存在的组名。
+>
 > 直接调 `./nginx/sbin/nginx` 需显式指定 prefix（`-p "$PWD/nginx/"`）：
 > nginx 编译进二进制的默认 prefix 是构建期的 `/usr/local/openresty`，
 > 裸跑不带 `-p` 无法在解压目录定位 conf。
@@ -68,6 +76,9 @@ curl http://127.0.0.1:80/      # 默认 conf 监听 80
 ```bash
 ./bin/resty -e 'io.write("hello\n")'
 ```
+
+> `bin/resty`、`bin/opm` 是 Perl 脚本，运行需要系统已安装 Perl（含 `FindBin` 模块）。
+> 精简镜像（如 `debian:*-slim`、`centos:7`）默认没有 Perl，先安装 `perl` 再用。
 
 ### CONNECT 正向代理（内置模块）
 
@@ -106,11 +117,35 @@ cd openresty-1.31.1.1
 ```powershell
 Expand-Archive openresty-1.31.1.1-windows-x86_64-msys2.zip
 cd openresty-1.31.1.1-win64
-.\nginx.exe             # 以当前目录为 prefix
+.\start.bat             # 自动切到包根目录并启动
+# 或手动（必须在包根目录内执行）：
+.\nginx.exe -p .
 ```
 
+> Windows 包编译期 prefix 为空，nginx 以**当前工作目录**为 prefix，因此必须在
+> 解压目录内运行（从 `C:\` 等其它目录直接调 `nginx.exe` 会找不到 `conf/nginx.conf`）；
+> `start.bat` 已处理这一点。`resty`/`resty.bat` 是 Perl 脚本，需要系统安装 Perl
+> （如 Strawberry Perl）。包内 `README.txt` 有同样的说明。
+>
 > Windows 构建基于 MSYS2 工具链，性能低于原生 Linux 构建，适合开发/测试/轻量
 > 场景；生产环境建议使用 Linux 构建。
+
+## 运行环境与已知限制
+
+- **Linux**：需要 glibc >= 2.17 与系统自带的 `libgcc_s.so.1`，其余依赖均在包内；
+  不支持 Alpine 等 musl 系统（缺 glibc 装载器，表现为 `nginx: not found`）。
+- **容器 / 只读根文件系统**：`nginx/logs/` 与运行期 `*_temp` 目录需要可写；
+  k8s 等只读根文件系统场景请把 prefix 下这些目录挂到可写卷。
+- **Debian/Ubuntu + root**：wrapper 会自动探测 `nobody`/`nogroup` 组并注入
+  `user nobody nogroup;`（含 `-g 'daemon off;'` 的容器启动姿势）；自定义 conf
+  若已显式写 `user`，需要自行给出目标系统存在的组名。
+- **端口**：默认 conf 监听 80。非 root 用户需 `sudo` 启动或修改 `listen`；
+  `smoke-test.sh` 在特权端口不可用时会自动换用高位端口。
+- **resty / opm**：Perl 脚本，运行需要系统 Perl（含 `FindBin`），Windows 同理。
+- **macOS**：要求 macOS >= 11.0；默认 80 端口同样需要 `sudo` 或改端口；
+  GUI 解压后被 Gatekeeper 拦截时按上文 `xattr` 处理。
+- **Windows**：`nginx.exe` 以当前目录为 prefix，必须在包根目录运行（用
+  `start.bat`）；`resty` 需要 Perl。
 
 ## 本地构建
 
@@ -202,7 +237,7 @@ macOS 版机制对应（`@loader_path` = dyld 运行时解析的"引用者自身
 | 层级 | 内容 | 性质 |
 | --- | --- | --- |
 | L0 构建自检 | `nginx -V`（编译参数）+ `nginx -t`（默认 conf 语法） | 门禁 |
-| L1 冒烟 | `smoke-test.sh` 起六组实例做 HTTP 级断言；附加动态依赖检查（系统库只允许 glibc 家族，其余必须解析到包内） | 门禁 |
+| L1 冒烟 | `smoke-test.sh` 起多组实例做 HTTP 级断言；附加动态依赖检查（系统库只允许 glibc 家族，其余必须解析到包内） | 门禁 |
 | L2 基准 | `benchmark.sh` 用 ab 跑静态/Lua 两场景吞吐，结果写入 `benchmark-<平台>-<架构>.txt` 并拼入 Release 说明 | 记录 + 残废检测 |
 
 L1 冒烟的实例分组：
@@ -210,8 +245,9 @@ L1 冒烟的实例分组：
 | 实例配置 | 验证点 |
 | --- | --- |
 | 默认 conf | 包内 conf 原样启动，resty.core 经 `$prefix` 相对路径加载（便携化核心点），正常退出 |
+| 默认 conf cpath | 复制默认 conf 追加一个 server，断言 `require "cjson"` 能从包内 `lualib/` 加载（防止 cpath 漏项回归） |
 | 静态 | 首页内容 + stub_status 输出 |
-| Lua | `content_by_lua_block` 动态输出（同时验证 LuaJIT 动态库加载） |
+| Lua | `content_by_lua_block` 动态输出 + `require "cjson"`（同时验证 LuaJIT 动态库与 lualib C 模块加载） |
 | TLS | 自签证书启动，https 连接内容断言 |
 | CONNECT | `--proxytunnel` 经代理隧道访问静态实例，验证 proxy_connect 模块 |
 | resty CLI | `bin/resty -e` 输出断言（验证便携路径推导与 lua 路径注入） |
@@ -228,8 +264,12 @@ L2 的吞吐数字来自共享 CI runner，波动较大，不作发布门槛；�
 - **被其他工作流调用**（workflow_call）：作为可复用构建发布流程。
 
 构建矩阵为 Linux x86_64 + Linux aarch64 + macOS arm64 + macOS x86_64（Intel）
-+ Windows x86_64/x86，全部通过后自动创建 GitHub Release（tag 为 OpenResty
-版本号）并上传全部产物与校验文件。
++ Windows x86_64/x86。Linux 构建完成后还会跑目标发行版冒烟矩阵
+（`centos:7`、`rockylinux:9-minimal`、`debian:11/12-slim`、
+`ubuntu:20.04/24.04`，均以 root 启动 x86_64 产物），覆盖 Debian 系缺少
+`nobody` 组、以及干净环境没有 `/usr/local/openresty/lualib` 这两类只在
+容器里暴露的问题。全部通过后自动创建 GitHub Release（tag 为 OpenResty
+版本号）并上传全部产物与校验文件；冒烟矩阵失败会阻断 release。
 可通过 `make_latest` / `prerelease` 输入控制 Release 标记。
 
 ## 便携补丁说明
@@ -254,7 +294,10 @@ OpenResty 的 configure 会把 resty 脚本的 `my $nginx_path;` patch 成硬编
 1. `my $nginx_path` 还原为上游自带的 FindBin 便携推导（按脚本自身位置定位
    `../nginx/sbin/nginx`）；
 2. 注入按脚本位置推导的 `lua_package_path`/`lua_package_cpath`（指向包内
-   `lualib/`、`site/lualib/`、`luajit/lib/`）。
+   `lualib/`、`site/lualib/`、`luajit/lib/`）；
+3. 以 root 运行且系统没有 `nobody` 组时（Debian/Ubuntu），把
+   `user nobody nogroup;` 合并进 resty 传给 nginx 的 `-g`，避免
+   `getgrnam("nobody")` 失败（与 bin/openresty wrapper 同一套探测逻辑）。
 
 此外还有两处打包期改写（非源码补丁，见 build-openresty.sh 注释）：
 
@@ -273,6 +316,7 @@ OpenResty 的 configure 会把 resty 脚本的 `my $nginx_path;` patch 成硬编
 ├── build-openresty-mac.sh                 # macOS 构建脚本（原生运行，install_name_tool 便携化）
 ├── build-openresty-win.sh                 # Windows 构建脚本（MSYS2 环境运行，官方构建流程 + 环境适配）
 ├── ci-fix-yum-repos.sh                    # CentOS 7 EOL 后的 yum 换源（容器内先于构建运行）
+├── ci-smoke-distro.sh                     # 目标发行版冒烟（CI smoke-distros job 在容器内运行）
 ├── smoke-test.sh                          # L1 冒烟编排：起多配置实例做 HTTP 级断言
 ├── benchmark.sh                           # L2 基准：ab 两场景吞吐 + 结果文件
 ├── patches/proxy_connect_1311.patch       # proxy_connect 的 nginx 1.31+ 核心适配

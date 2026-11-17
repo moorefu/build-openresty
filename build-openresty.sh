@@ -306,8 +306,74 @@ rm -f "$STAGE/$INNER/bin/openresty"
 cat > "$STAGE/$INNER/bin/openresty" <<'EOF'
 #!/bin/sh
 # 便携 wrapper: 按脚本自身位置定位包根, 以包内 nginx/ 为 prefix 启动,
-# 保证任意解压位置下 conf/logs/temp 路径均正确
+# 保证任意解压位置下 conf/logs/temp 路径均正确。
 or_root=$(cd "$(dirname "$0")/.." && pwd)
+
+# nginx 编译期默认 user/group 是 nobody:nobody; euid==0 且 conf 未指定
+# user 时会 getgrnam("nobody")。Debian/Ubuntu 只有 nogroup 组, 启动即失败。
+# 这里按目标系统探测, 把 user 指令合并进调用方的 -g (nginx 只保留最后
+# 一个 -g, 不能简单追加), conf 已显式设置 user 时不动。
+has_group() {
+    getent group "$1" >/dev/null 2>&1 && return 0
+    grep -q "^$1:" /etc/group 2>/dev/null
+}
+
+# 单引号包裹参数, 供 eval 安全重建参数表
+quote_arg() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+if [ "$(id -u)" = "0" ] && ! has_group nobody && has_group nogroup; then
+    prefix="$or_root/nginx/"
+    conf=""
+    has_g=""
+    pending=""
+    for arg in "$@"; do
+        case "$pending" in
+            p) prefix="$arg"; pending=""; continue ;;
+            c) conf="$arg"; pending=""; continue ;;
+            g) pending=""; continue ;;
+        esac
+        case "$arg" in
+            -g) has_g=1; pending="g" ;;
+            -g?*) has_g=1 ;;
+            -p) pending="p" ;;
+            -c) pending="c" ;;
+            -p?*) prefix="${arg#-p}" ;;
+            -c?*) conf="${arg#-c}" ;;
+        esac
+    done
+
+    case "$conf" in
+        "") conf="$prefix/conf/nginx.conf" ;;
+        /*) ;;
+        *) conf="$prefix/$conf" ;;
+    esac
+
+    if ! grep -qE '^[[:space:]]*user[[:space:]]' "$conf" 2>/dev/null; then
+        if [ -n "$has_g" ]; then
+            # 把 user 指令合并进已有 -g 值, 其余参数原样重建
+            newargs=""
+            merge_next=0
+            for arg in "$@"; do
+                if [ "$merge_next" = 1 ]; then
+                    arg="user nobody nogroup; $arg"
+                    merge_next=0
+                else
+                    case "$arg" in
+                        -g) merge_next=1 ;;
+                        -g?*) arg="-guser nobody nogroup; ${arg#-g}" ;;
+                    esac
+                fi
+                newargs="$newargs $(quote_arg "$arg")"
+            done
+            eval "set -- $newargs"
+        else
+            set -- -g 'user nobody nogroup;' "$@"
+        fi
+    fi
+fi
+
 exec "$or_root/nginx/sbin/nginx" -p "$or_root/nginx/" "$@"
 EOF
 chmod 755 "$STAGE/$INNER/bin/openresty"
@@ -316,12 +382,18 @@ chmod 755 "$STAGE/$INNER/bin/openresty"
 #    (运行时展开为 nginx prefix, 即 wrapper 传的 <包根>/nginx/)。
 #    上游默认 conf 不含 lua_package_path, 依赖编译进二进制的
 #    LUA_DEFAULT_PATH 绝对路径, 便携包中会因找不到 resty.core 而启动失败。
+#    cpath 必须包含包内 lualib/: cjson.so、librestysignal.so、redis/parser.so
+#    等 C 模块都在这里; 只写 luajit/lib 时, ";;" 兜底的是编译期绝对路径
+#    /usr/local/openresty/lualib/?.so, 干净机器上 require "cjson" 会失败。
 for conf in nginx.conf nginx.conf.default; do
-  sed -i '/^http {/a\    lua_package_path "$prefix/../lualib/?.lua;$prefix/../site/lualib/?.lua;;";\n    lua_package_cpath "$prefix/../luajit/lib/?.so;;";' \
+  sed -i '/^http {/a\    lua_package_path "$prefix/../lualib/?.lua;$prefix/../site/lualib/?.lua;;";\n    lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;";' \
     "$STAGE/$INNER/nginx/conf/$conf"
 done
 grep -q 'lua_package_path' "$STAGE/$INNER/nginx/conf/nginx.conf" || {
   echo "错误: 默认 conf 注入 lua_package_path 失败" >&2; exit 1; }
+grep -Fq 'lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;";' \
+  "$STAGE/$INNER/nginx/conf/nginx.conf" || {
+  echo "错误: 默认 conf 注入 lua_package_cpath 失败" >&2; exit 1; }
 
 # bin/ 下脚本不应引用构建期绝对前缀
 if grep -rl "$PREFIX" "$STAGE/$INNER/bin/" >/dev/null 2>&1; then
@@ -338,7 +410,8 @@ done
 cat > "$STAGE/$INNER/README.txt" <<EOF
 OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
 
-解压即用, 目标系统只需 glibc >= 2.17, 无需安装任何依赖库:
+解压即用, 除 glibc >= 2.17 与系统自带 libgcc_s 外无需安装任何依赖库
+(不支持 Alpine 等 musl 系统):
   - OpenSSL $OS_VER / PCRE2 $PCRE_VER / zlib $ZLIB_VER / LuaJIT 以动态链接
     方式随包分发 (lib/ 与 luajit/lib/), 二进制 rpath 指向包内目录
     (\$ORIGIN 相对路径, 不依赖系统安装)
@@ -346,8 +419,13 @@ OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
 
 基本用法 (推荐, 自动定位包内 nginx/ 为 prefix):
   ./bin/openresty                     # 启动 (默认 conf 监听 80)
+  sudo ./bin/openresty                # 非 root 无法绑定 80 时用 sudo
   ./bin/openresty -s reload|quit|stop # 信号控制
-  ./bin/resty -e 'print("hello")'     # LuaJIT/resty CLI
+  ./bin/resty -e 'print("hello")'     # LuaJIT/resty CLI (需要系统 Perl)
+
+Debian/Ubuntu 以 root 启动时, wrapper 会自动探测组名并注入
+"user nobody nogroup;" (Debian 系没有 nobody 组, 编译期默认是 nobody:nobody);
+若自定义 conf 里已显式设置 user, 需要同时给出组名 (如 user nobody nogroup;).
 
 直接调 nginx 二进制需显式指定 prefix:
   ./nginx/sbin/nginx -p \$PWD/nginx/
