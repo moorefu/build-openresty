@@ -32,7 +32,7 @@ command -v curl >/dev/null 2>&1 || { echo "错误: 找不到 curl" >&2; exit 1; 
 OPENSSL_BIN="${OPENSSL_BIN:-$(command -v openssl || true)}"
 [ -n "$OPENSSL_BIN" ] || { echo "错误: 找不到 openssl 命令, 无法生成 TLS 测试证书" >&2; exit 1; }
 
-P_DEF=80; P_HTTP=12411; P_LUA=12412; P_TLS=12413; P_CONN=12414
+P_DEF=8080; P_HTTP=12411; P_LUA=12412; P_TLS=12413; P_CONN=12414
 WORK="$(mktemp -d /tmp/or-smoke.XXXXXX)"
 # mktemp 创建的目录为 700, worker 默认以 nobody 运行会读不到 prefix 内文件
 chmod 755 "$WORK"
@@ -116,9 +116,9 @@ log "版本检查"
 # 验证点: (1) 编译期绝对 prefix 无效时 conf/可定位 (wrapper -p);
 # (2) 注入的 $prefix 相对 lua_package_path 能加载 resty.core (ngx_lua http
 # 初始化阶段必需, 加载失败则 worker 无法服务)
-# 默认 conf 监听 80; macOS 等非 root 环境绑不了 <1024 特权端口 —— 探测不可
-# 绑时复制默认 conf 仅改监听端口, 以 -c 指定 (-p 仍为包内 nginx/, prefix 与
-# lua_package_path 的 $prefix 语义不变, 不影响 resty.core 加载验证)
+# 默认 conf 监听 8080 (非特权端口); 若构建机上 8080 已被占用, 复制默认 conf
+# 仅改监听端口, 以 -c 指定 (-p 仍为包内 nginx/, prefix 与 lua_package_path 的
+# $prefix 语义不变, 不影响 resty.core 加载验证)
 DEF_CONF=""
 if ! "$PY" -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $P_DEF)); s.close()" 2>/dev/null; then
   P_DEF=18080
@@ -126,13 +126,13 @@ if ! "$PY" -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', $P_DEF)); 
   # -c 指定外部 conf 后 conf-prefix 随之变为该 conf 所在目录, 相对 include
   # 会解析到临时目录下而找不到文件
   sed -E \
-    -e "s/^([[:space:]]*listen[[:space:]]+)80;/\1$P_DEF;/" \
+    -e "s/^([[:space:]]*listen[[:space:]]+)8080;/\1$P_DEF;/" \
     -e "s|^([[:space:]]*include[[:space:]]+)([^/[:space:]][^;]*;)|\1$ROOT/nginx/conf/\2|" \
     "$ROOT/nginx/conf/nginx.conf" > "$WORK/nginx-def.conf"
   grep -qE "^[[:space:]]*listen[[:space:]]+$P_DEF;" "$WORK/nginx-def.conf" \
     || { echo "错误: 默认 conf 监听端口改写失败" >&2; exit 1; }
   DEF_CONF="-c $WORK/nginx-def.conf"
-  log "特权端口不可用, 默认 conf 以端口 $P_DEF 启动 (conf 其余原样)"
+  log "8080 被占用, 默认 conf 以端口 $P_DEF 启动 (conf 其余原样)"
 fi
 log "冒烟: 默认 conf 启动 (resty.core 加载)"
 rm -f "$ROOT/nginx/logs/error.log"
@@ -172,7 +172,7 @@ server {
 }
 EOF
 sed -E \
-  -e "s/^([[:space:]]*listen[[:space:]]+)80;/\1$P_CPATH_MAIN;/" \
+  -e "s/^([[:space:]]*listen[[:space:]]+)8080;/\1$P_CPATH_MAIN;/" \
   -e "s|^([[:space:]]*include[[:space:]]+)([^/[:space:]][^;]*;)|\1$ROOT/nginx/conf/\2|" \
   "$ROOT/nginx/conf/nginx.conf" > "$WORK/nginx-cpath.conf"
 grep -qE "^[[:space:]]*listen[[:space:]]+$P_CPATH_MAIN;" "$WORK/nginx-cpath.conf" \

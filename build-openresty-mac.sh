@@ -174,7 +174,6 @@ LD_OPTS="-L$DEPS/openssl/lib -L$DEPS/pcre2/lib -L$DEPS/zlib/lib"
   --with-cc-opt="$CC_OPTS" \
   --with-ld-opt="$LD_OPTS" \
   --with-pcre-jit \
-  --with-ipv6 \
   --with-threads \
   --with-http_ssl_module \
   --with-http_v2_module \
@@ -382,12 +381,51 @@ grep -Fq 'lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;
   "$PKG/nginx/conf/nginx.conf" || {
   echo "错误: 默认 conf 注入 lua_package_cpath 失败" >&2; exit 1; }
 
+# 6) 默认监听 8080 (与 Linux 版一致): 非 root 用户也能直接启动
+for conf in nginx.conf nginx.conf.default; do
+  perl -i -pe 's/^(\s*listen\s+)80;/$1 8080;/' "$PKG/nginx/conf/$conf"
+done
+grep -qE '^[[:space:]]*listen[[:space:]]+8080;' "$PKG/nginx/conf/nginx.conf" || {
+  echo "错误: 默认 conf 监听端口未改为 8080" >&2; exit 1; }
+
 # bin/ 下脚本不应引用构建期绝对前缀
 if grep -rl "$PREFIX" "$PKG/bin/" >/dev/null 2>&1; then
   echo "错误: 以下脚本仍引用构建期前缀 $PREFIX:" >&2
   grep -rl "$PREFIX" "$PKG/bin/" >&2
   exit 1
 fi
+
+# ---------- 第三方许可证汇总 ----------
+log "生成第三方许可证汇总"
+LUAJIT_COPYRIGHT="$(ls -d bundle/LuaJIT-*/COPYRIGHT 2>/dev/null | head -1)"
+{
+  echo "OpenResty $VERSION 便携版 (macOS $ARCH) — 第三方组件许可证"
+  echo
+  echo "OpenResty 本体版权与许可见包内 COPYRIGHT。"
+  echo "本包随包分发以下第三方组件:"
+  echo "  OpenSSL $OS_VER    Apache License 2.0"
+  echo "  PCRE2 $PCRE_VER    BSD-3-Clause"
+  echo "  zlib $ZLIB_VER     zlib License"
+  echo "  LuaJIT             MIT"
+  echo
+  for spec in \
+    "OpenSSL $OS_VER|$DEPS/openssl-$OS_VER/LICENSE.txt" \
+    "PCRE2 $PCRE_VER|$DEPS/pcre2-$PCRE_VER/LICENCE.md" \
+    "zlib $ZLIB_VER|$DEPS/zlib-$ZLIB_VER/LICENSE" \
+    "LuaJIT|$LUAJIT_COPYRIGHT"; do
+    name="${spec%%|*}"
+    file="${spec#*|}"
+    echo "=================================================================="
+    echo "== ${name}"
+    echo "=================================================================="
+    if [ -f "$file" ]; then
+      cat "$file"
+    else
+      echo "(许可证文件未在构建树中找到: ${file}; 请参见上游发布包)"
+    fi
+    echo
+  done
+} > "$PKG/THIRD_PARTY_LICENSES.txt"
 
 # 不做 strip: macOS strip 与签名顺序耦合, 收益小, 风险不值
 cat > "$PKG/README.txt" <<EOF
@@ -398,12 +436,11 @@ OpenResty $VERSION 便携版 (macOS $ARCH, macOS >= $MACOS_MIN)
     方式随包分发 (lib/ 与 luajit/lib/), 依赖引用改写为 @loader_path 相对
     路径 (按可执行文件自身位置定位, 不依赖系统安装)
   - 内置 ngx_http_proxy_connect_module (HTTP CONNECT 正向代理)
-  - 默认 conf 监听 80 端口, 非 root 无法绑定: 用 sudo 启动或改 listen 端口
+  - 默认 conf 监听 8080 端口, 非 root 也可直接启动
   - bin/resty、bin/opm 是 Perl 脚本, 运行需要系统 Perl (macOS 自带即可)
 
 基本用法 (推荐, 自动定位包内 nginx/ 为 prefix):
-  ./bin/openresty                     # 启动 (默认 conf 监听 80)
-  sudo ./bin/openresty                # 非 root 无法绑定 80 时用 sudo
+  ./bin/openresty                     # 启动 (默认 conf 监听 8080)
   ./bin/openresty -s reload|quit|stop # 信号控制
   ./bin/resty -e 'print("hello")'     # LuaJIT/resty CLI
 
@@ -420,6 +457,7 @@ OpenResty $VERSION 便携版 (macOS $ARCH, macOS >= $MACOS_MIN)
   luajit/  LuaJIT 解释器与动态库
   lualib/  lua-resty-* 库
   site/    opm 安装目录 (lualib/pod/manifest)
+  THIRD_PARTY_LICENSES.txt  第三方组件许可证
 EOF
 
 # ---------- L0: 构建自检 ----------
@@ -428,7 +466,7 @@ log "L0 构建自检 (nginx -V / -t)"
 "$PKG/bin/openresty" -t
 
 # ---------- L1: 冒烟测试 ----------
-# 共用 smoke-test.sh (macOS 下自动回退非特权端口跑默认 conf 场景)
+# 共用 smoke-test.sh (8080 被占用时自动换用高位端口跑默认 conf 场景)
 # 提高文件描述符上限, 避免 worker_connections 触发 rlimit 告警
 ulimit -n 2048 2>/dev/null || true
 log "L1 冒烟测试 (默认conf/静态/Lua/TLS/CONNECT/resty)"

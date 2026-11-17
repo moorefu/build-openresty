@@ -269,15 +269,39 @@ jobs:
   release:
     needs: [prepare, build-linux, build-windows, build-macos, smoke-distros]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read          # actions/download-artifact
+      # actions/attest-build-provenance 需要 OIDC 与 attestation 写权限
+      id-token: write
+      attestations: write
 
     steps:
       - name: Set version
         run: |
           echo "VERSION=${{ needs.prepare.outputs.release_version }}" >> $GITHUB_ENV
           echo "OS_VER=${{ needs.prepare.outputs.openssl_version }}" >> $GITHUB_ENV
+          echo "PCRE_VER=${{ needs.prepare.outputs.pcre_version }}" >> $GITHUB_ENV
+          echo "ZLIB_VER=${{ needs.prepare.outputs.zlib_version }}" >> $GITHUB_ENV
           echo "MACOS_MIN=11.0" >> $GITHUB_ENV
 
       - uses: actions/download-artifact@v4
+
+      - name: Generate SHA256SUMS
+        run: |
+          # 汇总校验和: 用 basename, 与 Release 资产名一致, 便于
+          # sha256sum -c 和 gh attestation verify 直接使用
+          : > SHA256SUMS
+          for f in openresty-*/*.tar.xz openresty-*/*.zip; do
+            ( cd "$(dirname "$f")" && sha256sum "$(basename "$f")" ) >> SHA256SUMS
+          done
+          sort -k2 SHA256SUMS -o SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: SHA256SUMS
 
       - name: Compose release body with benchmark results
         run: |
@@ -290,6 +314,17 @@ jobs:
               cat "$f"
               echo
             done
+            echo "## 构建信息"
+            echo
+            echo "- 依赖: OpenSSL ${OS_VER} / PCRE2 ${PCRE_VER} / zlib ${ZLIB_VER} (随包分发)"
+            echo "- Linux 基线: glibc 2.17; macOS 基线: ${MACOS_MIN}"
+            echo "- Linux 加固: stack protector / FORTIFY / 完整 RELRO (BIND_NOW)"
+            echo "- 默认 conf 监听 8080; 不支持 Alpine/musl; resty/opm 需要 Perl"
+            echo
+            echo "## 校验与来源"
+            echo
+            echo "- 校验和: 下载全部产物后执行 sha256sum -c SHA256SUMS"
+            echo "- 构建来源: gh attestation verify <文件> --repo ${GITHUB_REPOSITORY}"
           } > release_body.md
 
       - name: Create Release
@@ -302,6 +337,7 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           body_path: release_body.md
           files: |
+            SHA256SUMS
             openresty-linux-x86_64/openresty-${{ env.VERSION }}-linux-glibc2.17-x86_64-openssl-${{ env.OS_VER }}.tar.xz
             openresty-linux-x86_64/openresty-${{ env.VERSION }}-linux-glibc2.17-x86_64-openssl-${{ env.OS_VER }}.tar.xz.sha256
             openresty-linux-aarch64/openresty-${{ env.VERSION }}-linux-glibc2.17-aarch64-openssl-${{ env.OS_VER }}.tar.xz

@@ -32,7 +32,9 @@
 | macOS x86_64 | `openresty-<版本>-macos-11.0-x86_64-openssl-<SSL版本>.tar.xz` | dylib 随包，@loader_path 定位，macOS >= 11.0 |
 | Windows x86_64 | `openresty-<版本>-windows-x86_64-msys2.zip` | 官方 win 构建配置，解压即用 |
 
-每个压缩包均附带同名 `.sha256` 校验文件。Linux 包内顶层目录为纯版本名
+每个压缩包均附带同名 `.sha256` 校验文件；Release 另附汇总的 `SHA256SUMS`
+与 GitHub 构建来源证明（attestation），可用 `gh attestation verify` 校验。
+Linux 包内顶层目录为纯版本名
 `openresty-<版本>/`，采用 OpenResty 标准布局：
 
 ```
@@ -42,7 +44,8 @@ openresty-<版本>/
 ├── nginx/    nginx 核心（sbin/nginx、conf/、html/、logs/）
 ├── luajit/   LuaJIT 解释器与动态库（lib/libluajit-5.1.so）
 ├── lualib/   lua-resty-* 库
-└── site/     opm 安装目录（lualib/pod/manifest）
+├── site/     opm 安装目录（lualib/pod/manifest）
+└── THIRD_PARTY_LICENSES.txt  第三方组件许可证（OpenSSL/PCRE2/zlib/LuaJIT 等）
 ```
 
 ## 使用方法
@@ -53,15 +56,15 @@ openresty-<版本>/
 tar -xJf openresty-1.31.1.1-linux-glibc2.17-x86_64-openssl-3.5.6.tar.xz
 cd openresty-1.31.1.1
 ./bin/openresty                # 以包内 nginx/ 为 prefix 启动
-curl http://127.0.0.1:80/      # 默认 conf 监听 80
+curl http://127.0.0.1:8080/    # 默认 conf 监听 8080
 ```
 
 `bin/openresty` 是便携 wrapper：按脚本自身位置定位包根并传 `-p`，
 任意解压位置、任意调用姿势（含符号链接）下 conf/logs/temp 路径都正确。
 信号控制同样走 wrapper：`./bin/openresty -s reload|quit|stop`。
 
-> 默认 conf 监听 80 端口，普通用户无法绑定：用 `sudo ./bin/openresty` 启动，或修改
-> `nginx/conf/nginx.conf` 的 `listen`。Debian/Ubuntu 以 root 启动时，wrapper 会自动
+> 默认 conf 监听 8080 端口（非特权），普通用户可直接启动；如需 80 端口，
+> 修改 `nginx/conf/nginx.conf` 的 `listen` 并用 `sudo` 启动。Debian/Ubuntu 以 root 启动时，wrapper 会自动
 > 探测 `nobody`/`nogroup` 组并把 `user nobody nogroup;` 合并进 `-g`
 > （nginx 编译期默认是 `nobody:nobody`，而 Debian 系只有 `nogroup` 组），
 > 含 `-g 'daemon off;'` 的容器启动姿势同样生效；自定义 conf 若已显式写 `user`，
@@ -106,8 +109,8 @@ cd openresty-1.31.1.1
 
 - 包要求 macOS >= 11.0；arm64 包用于 Apple Silicon，x86_64 包用于 Intel 机型
   （在 Apple Silicon 上也可经 Rosetta 运行，但建议用 arm64 包）；
-- 默认 conf 监听 80 端口，非 root 无法绑定：用 `sudo ./bin/openresty` 启动，
-  或改 `nginx/conf/nginx.conf` 的 `listen` 端口；
+- 默认 conf 监听 8080 端口，非 root 可直接启动；如需 80 端口，
+  改 `nginx/conf/nginx.conf` 的 `listen` 并用 `sudo` 启动；
 - 若用"访达"等 GUI 方式解压后运行被 Gatekeeper 拦截，执行
   `xattr -dr com.apple.quarantine <包目录>` 清除隔离扩展属性（命令行
   `tar` 解压不会产生该问题）。
@@ -139,13 +142,14 @@ cd openresty-1.31.1.1-win64
 - **Debian/Ubuntu + root**：wrapper 会自动探测 `nobody`/`nogroup` 组并注入
   `user nobody nogroup;`（含 `-g 'daemon off;'` 的容器启动姿势）；自定义 conf
   若已显式写 `user`，需要自行给出目标系统存在的组名。
-- **端口**：默认 conf 监听 80。非 root 用户需 `sudo` 启动或修改 `listen`；
-  `smoke-test.sh` 在特权端口不可用时会自动换用高位端口。
+- **端口**：默认 conf 监听 8080（非特权），普通用户可直接启动；如需 80 端口，
+  修改 `listen` 并用 `sudo` 启动。`smoke-test.sh` 在 8080 被占用时会自动换用
+  高位端口。
 - **resty / opm**：Perl 脚本，运行需要系统 Perl（含 `FindBin`），Windows 同理。
-- **macOS**：要求 macOS >= 11.0；默认 80 端口同样需要 `sudo` 或改端口；
-  GUI 解压后被 Gatekeeper 拦截时按上文 `xattr` 处理。
+- **macOS**：要求 macOS >= 11.0；默认 8080 端口，普通用户可启动（改 80 需
+  `sudo` 或改端口）；GUI 解压后被 Gatekeeper 拦截时按上文 `xattr` 处理。
 - **Windows**：`nginx.exe` 以当前目录为 prefix，必须在包根目录运行（用
-  `start.bat`）；`resty` 需要 Perl。
+  `start.bat`）；默认 conf 监听 8080；`resty` 需要 Perl。
 
 ## 本地构建
 
@@ -222,6 +226,17 @@ macOS 版机制对应（`@loader_path` = dyld 运行时解析的"引用者自身
   系统库（`/System`、`/usr/lib`）与可解析到包内文件的 `@loader_path` 引用，
   且部署基线（minos）不得高于发布基线。
 
+### 编译加固（Linux）
+
+- nginx 与随包依赖（OpenSSL/PCRE2/zlib）统一启用 `-O2 -fstack-protector-strong
+  -fPIC -D_FORTIFY_SOURCE=2`，链接 `-Wl,-z,relro,-z,now`（完整 RELRO /
+  BIND_NOW）；打包时断言 nginx 动态段含 `BIND_NOW`，防止参数丢失。
+- rpath 用 `patchelf --force-rpath` 生成 `DT_RPATH`（而非 `DT_RUNPATH`），
+  用户自行编译的 C 模块也能继承包内库搜索路径。
+- 发布前对 nginx/luajit、`lib/*.so*`、`luajit/lib` 与 `lualib/*.so` 执行 strip
+  （`--strip-unneeded` 保留动态符号），减小体积。
+- 包内附 `THIRD_PARTY_LICENSES.txt`（OpenSSL/PCRE2/zlib/LuaJIT 及 libxcrypt 声明）。
+
 ### Windows（MSYS2）
 
 在 GitHub Actions 的 MSYS2 MINGW64/MINGW32 环境运行 `build-openresty-win.sh`
@@ -269,8 +284,12 @@ L2 的吞吐数字来自共享 CI runner，波动较大，不作发布门槛；�
 `ubuntu:20.04/24.04`，均以 root 启动 x86_64 产物），覆盖 Debian 系缺少
 `nobody` 组、以及干净环境没有 `/usr/local/openresty/lualib` 这两类只在
 容器里暴露的问题。全部通过后自动创建 GitHub Release（tag 为 OpenResty
-版本号）并上传全部产物与校验文件；冒烟矩阵失败会阻断 release。
+版本号）并上传全部产物、汇总 `SHA256SUMS` 与构建来源证明
+（`actions/attest-build-provenance`）；冒烟矩阵失败会阻断 release。
 可通过 `make_latest` / `prerelease` 输入控制 Release 标记。
+
+> 以 `workflow_call` 复用时，调用方需允许 `id-token: write` 与
+> `attestations: write` 权限，否则 release 的 provenance 步骤会失败。
 
 ## 便携补丁说明
 

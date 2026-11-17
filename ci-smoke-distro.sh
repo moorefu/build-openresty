@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT="${1:?Usage: $0 <包根目录>}"
 ROOT="$(cd "$ROOT" && pwd)"
 NGINX="$ROOT/bin/openresty"
-PORT_HTTP=80
+PORT_HTTP=8080
 PORT_CJSON=18080
 PID=""
 WORK="$(mktemp -d /tmp/or-ci-smoke.XXXXXX)"

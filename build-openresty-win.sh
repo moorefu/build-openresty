@@ -233,10 +233,16 @@ done
 [ "$BUILD_OK" = "1" ] || { echo "ERROR: build failed after 3 attempts" >&2; exit 1; }
 
 # ---------- 打包 ----------
+# 默认 conf 监听 8080 (与 Linux/macOS 一致): 普通用户也能直接启动
+log "默认 conf 监听端口改为 8080"
+sed -i -E 's/^([[:space:]]*listen[[:space:]]+)80;/\1 8080;/' conf/nginx.conf conf/nginx.conf.default
+grep -qE '^[[:space:]]*listen[[:space:]]+8080;' conf/nginx.conf || {
+  echo "ERROR: 默认 conf 监听端口未改为 8080" >&2; exit 1; }
+
 # 上游 configure 带 -g, nginx.exe/luajit.exe 含完整调试符号 (约 44MB);
 # 发布包不需要调试符号, 打包前 strip (只影响符号表, 不影响可执行代码)
 log "strip 调试符号"
-strip -s nginx.exe luajit.exe 2>/dev/null || true
+strip -s nginx.exe luajit.exe lua51.dll 2>/dev/null || true
 
 log "Running util/package-win32.sh"
 bash util/package-win32.sh
@@ -263,12 +269,48 @@ OpenResty $VERSION 便携版 (Windows $ARCH, MSYS2)
   start.bat          # 自动切到本目录后启动
   nginx.exe -p .     # 或在包根目录手动运行
 
-- 默认 conf 监听 80 端口
+- 默认 conf 监听 8080 端口
 - resty.bat / resty 是 Perl 脚本, 需要系统安装 Perl (如 Strawberry Perl)
 - Windows 构建基于 MSYS2 工具链, 适合开发/测试/轻量场景
+- 第三方组件许可证见 THIRD_PARTY_LICENSES.txt
 EOF
-unix2dos -q "$PKG_DIR/start.bat" "$PKG_DIR/README.txt"
-zip -q "$ZIPFILE" "$PKG_DIR/start.bat" "$PKG_DIR/README.txt"
+
+# 第三方许可证汇总 (版本跟随上游 util/build-win32.sh)
+SSL_V="$(sed -n 's/^OPENSSL=//p' util/build-win32.sh | head -1)"
+PCRE_V="$(sed -n 's/^PCRE=//p' util/build-win32.sh | head -1)"
+ZLIB_V="$(sed -n 's/^ZLIB=//p' util/build-win32.sh | head -1)"
+LUAJIT_COPYRIGHT="$(ls -d bundle/LuaJIT-*/COPYRIGHT 2>/dev/null | head -1)"
+{
+  echo "OpenResty $VERSION 便携版 (Windows $ARCH, MSYS2) — 第三方组件许可证"
+  echo
+  echo "OpenResty 本体版权与许可见包内 COPYRIGHT。"
+  echo "本包内含以下第三方组件:"
+  echo "  OpenSSL $SSL_V    Apache License 2.0"
+  echo "  PCRE2 $PCRE_V     BSD-3-Clause"
+  echo "  zlib $ZLIB_V      zlib License"
+  echo "  LuaJIT            MIT"
+  echo
+  for spec in \
+    "OpenSSL $SSL_V|objs/lib/$SSL_V/LICENSE.txt" \
+    "PCRE2 $PCRE_V|objs/lib/$PCRE_V/LICENCE.md" \
+    "zlib $ZLIB_V|objs/lib/$ZLIB_V/LICENSE" \
+    "LuaJIT|$LUAJIT_COPYRIGHT"; do
+    name="${spec%%|*}"
+    file="${spec#*|}"
+    echo "=================================================================="
+    echo "== ${name}"
+    echo "=================================================================="
+    if [ -f "$file" ]; then
+      cat "$file"
+    else
+      echo "(许可证文件未在构建树中找到: ${file}; 请参见上游发布包)"
+    fi
+    echo
+  done
+} > "$PKG_DIR/THIRD_PARTY_LICENSES.txt"
+
+unix2dos -q "$PKG_DIR/start.bat" "$PKG_DIR/README.txt" "$PKG_DIR/THIRD_PARTY_LICENSES.txt"
+zip -q "$ZIPFILE" "$PKG_DIR/start.bat" "$PKG_DIR/README.txt" "$PKG_DIR/THIRD_PARTY_LICENSES.txt"
 
 DIST="openresty-${VERSION}-windows-${ARCH}-msys2"
 mv "$ZIPFILE" "../${DIST}.zip"

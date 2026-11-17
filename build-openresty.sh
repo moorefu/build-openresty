@@ -7,8 +7,9 @@ set -e
 # 在 manylinux2014 (glibc 2.17) 容器内运行, 构建便携的 OpenResty:
 # OpenSSL/PCRE2/zlib/LuaJIT 全部动态链接, 对应 .so 随包分发 ——
 # OpenSSL/PCRE2/zlib 位于包内 lib/, LuaJIT 位于包内 luajit/lib/,
-# nginx 与 luajit 解释器的 rpath 用 patchelf 改写为 $ORIGIN 相对路径,
-# 解压到任意目录即用, 目标机器只需 glibc >= 2.17, 无需安装任何依赖库。
+# nginx 与 luajit 解释器的 rpath 用 patchelf 改写为 $ORIGIN 相对路径
+# (DT_RPATH), 解压到任意目录即用, 目标机器只需 glibc >= 2.17。
+# 编译加固: 栈保护 + FORTIFY + 完整 RELRO (BIND_NOW), 随包共享库 strip。
 # 产出 openresty-<版本>-linux-glibc2.17-<架构>-openssl-<ssl版本>.tar.xz (+ .sha256),
 # 包内顶层目录为纯版本名: openresty-<版本>/{bin,lib,nginx,luajit,lualib,site}。
 #
@@ -21,8 +22,9 @@ set -e
 #      路径推导, 并注入按脚本位置定位的 lua 模块搜索路径 (上游依赖编译进
 #      二进制的 LUA_DEFAULT_PATH 绝对路径, 便携包中失效)
 #   3. bin/openresty 由绝对路径 symlink 替换为按脚本位置推导的 wrapper
-#   4. 包内默认 nginx.conf 注入 lua_package_path ($prefix 相对形式, ngx_lua
-#      原生支持 $prefix 运行时展开)
+#   4. 包内默认 nginx.conf 注入 lua_package_path/cpath ($prefix 相对形式,
+#      ngx_lua 原生支持 $prefix 运行时展开), 并改为监听 8080 (非 root 可用)
+#   5. 附 THIRD_PARTY_LICENSES.txt (OpenSSL/PCRE2/zlib/LuaJIT/libxcrypt)
 # 运行姿势: ./bin/openresty (自动以包内 nginx/ 为 prefix), 或
 # ./nginx/sbin/nginx -p <包根>/nginx/ (nginx 编译进二进制的默认 prefix
 # 是构建期的 /usr/local/openresty, 直接裸跑不带 -p 无法定位 conf)。
@@ -57,6 +59,11 @@ fi
 
 DEPS=/tmp/or-deps            # 动态依赖的编译安装前缀
 NPROC=$(nproc)
+
+# 加固编译选项 (OpenSSL/PCRE2/zlib/nginx 共用): 栈保护 + FORTIFY + 完整 RELRO。
+# -fPIC 让产物可作为 PIE/动态模块基础; BIND_NOW (-z now) 需要链接期生效。
+HARDEN_CFLAGS="-O2 -fstack-protector-strong -fPIC -D_FORTIFY_SOURCE=2"
+HARDEN_LDFLAGS="-Wl,-z,relro,-z,now"
 
 log() { echo "==> $*"; }
 
@@ -151,6 +158,7 @@ if [ ! -f "$DEPS/openssl/lib/libssl.so" ]; then
   tar -xzf "openssl-$OS_VER.tar.gz"
   cd "openssl-$OS_VER"
   ./Configure "linux-$ARCH" shared no-tests \
+    $HARDEN_CFLAGS $HARDEN_LDFLAGS \
     --prefix="$DEPS/openssl" --openssldir="$DEPS/openssl" --libdir=lib
   make -j"$NPROC"
   make install_sw
@@ -163,7 +171,8 @@ if [ ! -f "$DEPS/pcre2/lib/libpcre2-8.so" ]; then
   download "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE_VER}/pcre2-${PCRE_VER}.tar.gz"
   tar -xzf "pcre2-$PCRE_VER.tar.gz"
   cd "pcre2-$PCRE_VER"
-  ./configure --enable-shared --disable-static --enable-jit --prefix="$DEPS/pcre2"
+  CFLAGS="$HARDEN_CFLAGS" LDFLAGS="$HARDEN_LDFLAGS" \
+    ./configure --enable-shared --disable-static --enable-jit --prefix="$DEPS/pcre2"
   make -j"$NPROC"
   make install
   cd "$DEPS"
@@ -177,7 +186,8 @@ if [ ! -f "$DEPS/zlib/lib/libz.so" ]; then
   download "https://github.com/madler/zlib/releases/download/v${ZLIB_VER}/zlib-${ZLIB_VER}.tar.gz"
   tar -xzf "zlib-$ZLIB_VER.tar.gz"
   cd "zlib-$ZLIB_VER"
-  ./configure --shared --prefix="$DEPS/zlib"
+  CFLAGS="$HARDEN_CFLAGS" LDFLAGS="$HARDEN_LDFLAGS" \
+    ./configure --shared --prefix="$DEPS/zlib"
   make -j"$NPROC"
   make install
   cd "$DEPS"
@@ -197,16 +207,16 @@ cd "openresty-${VERSION}"
 # 系统/指定路径下的 -lssl/-lcrypto/-lpcre2-8/-lz。链接期 rpath 指向 $DEPS
 # 绝对路径(构建树即可直接运行测试), 打包时统一 patchelf 改写为 $ORIGIN。
 # LuaJIT 仍由 OpenResty 内部构建(动态), rpath 由其 configure 自动加。
-CC_OPTS="-I$DEPS/openssl/include -I$DEPS/pcre2/include -I$DEPS/zlib/include"
+CC_OPTS="$HARDEN_CFLAGS -I$DEPS/openssl/include -I$DEPS/pcre2/include -I$DEPS/zlib/include"
 LD_OPTS="-L$DEPS/openssl/lib -L$DEPS/pcre2/lib -L$DEPS/zlib/lib \
-    -Wl,-rpath,$DEPS/openssl/lib -Wl,-rpath,$DEPS/pcre2/lib -Wl,-rpath,$DEPS/zlib/lib"
+    -Wl,-rpath,$DEPS/openssl/lib -Wl,-rpath,$DEPS/pcre2/lib -Wl,-rpath,$DEPS/zlib/lib \
+    $HARDEN_LDFLAGS"
 
 ./configure \
   --prefix="$PREFIX" \
   --with-cc-opt="$CC_OPTS" \
   --with-ld-opt="$LD_OPTS" \
   --with-pcre-jit \
-  --with-ipv6 \
   --with-threads \
   --with-http_ssl_module \
   --with-http_v2_module \
@@ -283,12 +293,20 @@ fi
 #    包内 lib/*.so     -> $ORIGIN (lib 内互找, 如 libssl 找 libcrypto/libcrypt)
 #    (构建期 rpath 是 $DEPS/$PREFIX 绝对路径, 这里只在构建机上改写一次,
 #    用户侧无任何工具要求)
-patchelf --set-rpath '$ORIGIN/../../lib:$ORIGIN/../../luajit/lib' \
+#    用 --force-rpath 生成 DT_RPATH 而非 DT_RUNPATH: RPATH 可被包内用户自行
+#    编译的 C 模块继承 (RUNPATH 不会), 便携场景更合适。
+patchelf --force-rpath --set-rpath '$ORIGIN/../../lib:$ORIGIN/../../luajit/lib' \
   "$STAGE/$INNER/nginx/sbin/nginx"
-patchelf --set-rpath '$ORIGIN/../lib' "$STAGE/$INNER/luajit/bin/luajit"
+patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "$STAGE/$INNER/luajit/bin/luajit"
 for so in "$STAGE/$INNER/lib/"*.so.*; do
-  [ -f "$so" ] && patchelf --set-rpath '$ORIGIN' "$so"
+  [ -f "$so" ] && patchelf --force-rpath --set-rpath '$ORIGIN' "$so"
 done
+
+# 加固/便携断言: 完整 RELRO (BIND_NOW) 与 DT_RPATH
+readelf -d "$STAGE/$INNER/nginx/sbin/nginx" | grep -q 'BIND_NOW' || {
+  echo "错误: nginx 未启用 BIND_NOW (完整 RELRO)" >&2; exit 1; }
+readelf -d "$STAGE/$INNER/nginx/sbin/nginx" | grep -q '(RPATH)' || {
+  echo "错误: nginx 未使用 DT_RPATH (patchelf --force-rpath 未生效)" >&2; exit 1; }
 
 # 兜底: 安装树里其余 ELF 的动态段不允许残留构建期绝对路径
 for elf in $(find "$STAGE/$INNER" -type f | while read -r f; do
@@ -395,6 +413,15 @@ grep -Fq 'lua_package_cpath "$prefix/../lualib/?.so;$prefix/../luajit/lib/?.so;;
   "$STAGE/$INNER/nginx/conf/nginx.conf" || {
   echo "错误: 默认 conf 注入 lua_package_cpath 失败" >&2; exit 1; }
 
+# 5) 默认监听 8080: 80 是特权端口, 普通用户"解压即用"会 bind 失败。
+#    只改包内默认 conf, 用户仍可自行改回 80。
+for conf in nginx.conf nginx.conf.default; do
+  sed -i -E 's/^([[:space:]]*listen[[:space:]]+)80;/\1 8080;/' \
+    "$STAGE/$INNER/nginx/conf/$conf"
+done
+grep -qE '^[[:space:]]*listen[[:space:]]+8080;' "$STAGE/$INNER/nginx/conf/nginx.conf" || {
+  echo "错误: 默认 conf 监听端口未改为 8080" >&2; exit 1; }
+
 # bin/ 下脚本不应引用构建期绝对前缀
 if grep -rl "$PREFIX" "$STAGE/$INNER/bin/" >/dev/null 2>&1; then
   echo "错误: 以下脚本仍引用构建期前缀 $PREFIX:" >&2
@@ -406,6 +433,54 @@ fi
 for elf in "$STAGE/$INNER/nginx/sbin/nginx" "$STAGE/$INNER/luajit/bin/luajit"; do
   strip --strip-all "$elf" 2>/dev/null || true
 done
+# 随包共享库与 lualib C 模块也去掉符号表 (--strip-unneeded 保留动态符号)
+find "$STAGE/$INNER/lib" "$STAGE/$INNER/luajit/lib" "$STAGE/$INNER/lualib" \
+  -type f \( -name '*.so' -o -name '*.so.*' \) -print0 2>/dev/null |
+  xargs -0 -r strip --strip-unneeded 2>/dev/null || true
+
+# ---------- 第三方许可证汇总 ----------
+# 随包分发的是动态库, 需要一并提供对应许可证; libxcrypt 为 LGPL, 提供声明
+# 与源码获取方式 (完整文本随发行版/上游项目提供)。
+log "生成第三方许可证汇总"
+LUAJIT_COPYRIGHT="$(ls -d bundle/LuaJIT-*/COPYRIGHT 2>/dev/null | head -1)"
+{
+  echo "OpenResty $VERSION 便携版 (Linux $ARCH) — 第三方组件许可证"
+  echo
+  echo "OpenResty 本体版权与许可见包内 COPYRIGHT。"
+  echo "本包随包分发以下第三方组件:"
+  echo "  OpenSSL $OS_VER    Apache License 2.0"
+  echo "  PCRE2 $PCRE_VER    BSD-3-Clause"
+  echo "  zlib $ZLIB_VER     zlib License"
+  echo "  LuaJIT             MIT"
+  echo "  libxcrypt          LGPL-2.1 (libcrypt.so.2, 仅 Linux)"
+  echo
+  for spec in \
+    "OpenSSL $OS_VER|$DEPS/openssl-$OS_VER/LICENSE.txt" \
+    "PCRE2 $PCRE_VER|$DEPS/pcre2-$PCRE_VER/LICENCE.md" \
+    "zlib $ZLIB_VER|$DEPS/zlib-$ZLIB_VER/LICENSE" \
+    "LuaJIT|$LUAJIT_COPYRIGHT"; do
+    name="${spec%%|*}"
+    file="${spec#*|}"
+    echo "=================================================================="
+    echo "== ${name}"
+    echo "=================================================================="
+    if [ -f "$file" ]; then
+      cat "$file"
+    else
+      echo "(许可证文件未在构建树中找到: ${file}; 请参见上游发布包)"
+    fi
+    echo
+  done
+  cat <<'EOT'
+==================================================================
+== libxcrypt (libcrypt.so.2) — LGPL-2.1
+==================================================================
+本包内的 libcrypt.so.2 来自 manylinux2014 构建环境的 libxcrypt 项目
+(https://github.com/besser82/libxcrypt), 按 GNU LGPL v2.1 分发。
+对应源码可从该项目地址获取, 或从构建镜像
+quay.io/pypa/manylinux2014_x86_64 / _aarch64 中获取。
+EOT
+} > "$STAGE/$INNER/THIRD_PARTY_LICENSES.txt"
 
 cat > "$STAGE/$INNER/README.txt" <<EOF
 OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
@@ -416,10 +491,10 @@ OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
     方式随包分发 (lib/ 与 luajit/lib/), 二进制 rpath 指向包内目录
     (\$ORIGIN 相对路径, 不依赖系统安装)
   - 内置 ngx_http_proxy_connect_module (HTTP CONNECT 正向代理)
+  - 构建启用栈保护/FORTIFY/完整 RELRO (BIND_NOW), 随包共享库已 strip
 
 基本用法 (推荐, 自动定位包内 nginx/ 为 prefix):
-  ./bin/openresty                     # 启动 (默认 conf 监听 80)
-  sudo ./bin/openresty                # 非 root 无法绑定 80 时用 sudo
+  ./bin/openresty                     # 启动 (默认 conf 监听 8080, 非 root 即可)
   ./bin/openresty -s reload|quit|stop # 信号控制
   ./bin/resty -e 'print("hello")'     # LuaJIT/resty CLI (需要系统 Perl)
 
@@ -437,6 +512,7 @@ Debian/Ubuntu 以 root 启动时, wrapper 会自动探测组名并注入
   luajit/  LuaJIT 解释器与动态库
   lualib/  lua-resty-* 库
   site/    opm 安装目录 (lualib/pod/manifest)
+  THIRD_PARTY_LICENSES.txt  第三方组件许可证
 EOF
 
 # ---------- L0: 构建自检 ----------
