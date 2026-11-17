@@ -265,14 +265,21 @@ EOF
 cat > "$PKG_DIR/README.txt" <<EOF
 OpenResty $VERSION 便携版 (Windows $ARCH, MSYS2)
 
-运行 (nginx 以当前目录为 prefix, 必须先 cd 到本包根目录):
-  start.bat          # 自动切到本目录后启动
+运行:
+  start.bat          # 自动切到包目录并启动 (可在任意目录双击)
   .\nginx.exe -p .   # 或在包根目录手动运行
 
 - 默认 conf 监听 8080 端口
 - resty.bat / resty 是 Perl 脚本, 需要系统安装 Perl (如 Strawberry Perl)
 - Windows 构建基于 MSYS2 工具链, 适合开发/测试/轻量场景
 - 第三方组件许可证见 THIRD_PARTY_LICENSES.txt
+
+Windows 官方构建的已知限制:
+  - 仅支持 select/poll IO 模型, 不支持 IOCP; 高并发场景不建议用于生产
+  - 多 worker 时只有第一个 worker 真正处理请求 (worker_processes 多开无效)
+  - worker_connections 受 FD_SETSIZE=1024 限制, 并发连接数不能超过 1024
+  - 不支持 UDP/QUIC; 配置里写 "use epoll" 会报错 (只支持 select/poll)
+  - nginx -s <signal> 需要在能定位 conf 的目录运行; 用 start.bat -s ... 即可
 EOF
 
 # 第三方许可证汇总 (版本跟随上游 util/build-win32.sh)

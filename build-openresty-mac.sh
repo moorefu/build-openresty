@@ -217,6 +217,12 @@ PKG="$STAGE/$INNER"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -a "install$PREFIX" "$PKG"
 
+# 顶层 include/luajit-2.1: 供用户编译 Lua C 模块 (与 Windows 包布局一致)
+mkdir -p "$PKG/include"
+cp -a "$PKG/luajit/include/luajit-2.1" "$PKG/include/"
+[ -f "$PKG/include/luajit-2.1/lua.h" ] || {
+  echo "错误: 打包顶层 LuaJIT 头文件失败" >&2; exit 1; }
+
 # 1) 依赖 dylib 打进包内 lib/ (cp -P 保留符号链接链); 拷贝失败即中止
 mkdir -p "$PKG/lib"
 for libdir in "$DEPS/openssl/lib" "$DEPS/pcre2/lib" "$DEPS/zlib/lib"; do
@@ -452,6 +458,7 @@ OpenResty $VERSION 便携版 (macOS $ARCH, macOS >= $MACOS_MIN)
 
 目录结构:
   bin/     openresty 启动 wrapper, resty CLI, opm 包管理器
+  include/ LuaJIT 头文件 (luajit-2.1/, 编译 Lua C 模块用)
   lib/     OpenSSL/PCRE2/zlib 动态库 (dylib)
   nginx/   nginx 核心 (sbin/nginx, conf/, html/, logs/)
   luajit/  LuaJIT 解释器与动态库

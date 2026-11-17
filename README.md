@@ -40,6 +40,7 @@ Linux 包内顶层目录为纯版本名
 ```
 openresty-<版本>/
 ├── bin/      openresty 启动 wrapper、resty CLI、opm 包管理器、restydoc
+├── include/  LuaJIT 头文件（luajit-2.1/，编译 Lua C 模块用）
 ├── lib/      依赖动态库（libssl/libcrypto/libpcre2-8/libz/libcrypt）
 ├── nginx/    nginx 核心（sbin/nginx、conf/、html/、logs/）
 ├── luajit/   LuaJIT 解释器与动态库（lib/libluajit-5.1.so）
@@ -121,15 +122,21 @@ cd openresty-1.31.1.1
 ```powershell
 Expand-Archive openresty-1.31.1.1-windows-x86_64-msys2.zip
 cd openresty-1.31.1.1-win64
-.\start.bat             # 自动切到包根目录并启动
-# 或手动（必须在包根目录内执行）：
+.\start.bat             # 自动切到包目录并启动（可在任意目录双击）
+# 或手动（在包根目录内）：
 .\nginx.exe -p .
 ```
 
-> Windows 包编译期 prefix 为空，nginx 以**当前工作目录**为 prefix，因此必须在
-> 解压目录内运行（从 `C:\` 等其它目录直接调 `nginx.exe` 会找不到 `conf/nginx.conf`）；
-> `start.bat` 已处理这一点。`resty`/`resty.bat` 是 Perl 脚本，需要系统安装 Perl
-> （如 Strawberry Perl）。包内 `README.txt` 有同样的说明。
+> Windows 包编译期 prefix 为空，nginx 以当前工作目录为 prefix；`start.bat`
+> 会自动切换目录，可在任意位置启动。手动调用 `nginx.exe` 时需先 cd 到包根
+> 目录，或显式传 `-p <包根>`。`resty`/`resty.bat` 是 Perl 脚本，需要系统安装
+> Perl（如 Strawberry Perl）。
+>
+> **Windows 官方构建的已知限制**：仅支持 select/poll 模型（不支持 IOCP，
+> `use epoll` 会报错）；多 worker 时只有第一个真正处理请求；
+> `worker_connections` 受 `FD_SETSIZE=1024` 限制；不支持 UDP/QUIC；
+> `nginx -s` 需在能定位 conf 的目录运行（可用 `start.bat -s ...`）。
+> 详见包内 `README.txt`。
 >
 > Windows 构建基于 MSYS2 工具链，性能低于原生 Linux 构建，适合开发/测试/轻量
 > 场景；生产环境建议使用 Linux 构建。
@@ -149,8 +156,10 @@ cd openresty-1.31.1.1-win64
 - **resty / opm**：Perl 脚本，运行需要系统 Perl（含 `FindBin`），Windows 同理。
 - **macOS**：要求 macOS >= 11.0；默认 8080 端口，普通用户可启动（改 80 需
   `sudo` 或改端口）；GUI 解压后被 Gatekeeper 拦截时按上文 `xattr` 处理。
-- **Windows**：`nginx.exe` 以当前目录为 prefix，必须在包根目录运行（用
-  `start.bat`）；默认 conf 监听 8080；`resty` 需要 Perl。
+- **Windows**：`nginx.exe` 以当前目录为 prefix，建议用 `start.bat`（可在任意
+  目录启动）；手动调用需在包根目录或传 `-p`。默认 conf 监听 8080；`resty`
+  需要 Perl。官方 Windows 构建仅支持 select/poll、多 worker 只有第一个工作、
+  并发上限 1024（FD_SETSIZE）、不支持 UDP/QUIC。
 
 ## 本地构建
 
@@ -231,7 +240,11 @@ macOS 版机制对应（`@loader_path` = dyld 运行时解析的"引用者自身
 
 - nginx 与随包依赖（OpenSSL/PCRE2/zlib）统一启用 `-O2 -fstack-protector-strong
   -fPIC -D_FORTIFY_SOURCE=2`，链接 `-Wl,-z,relro,-z,now`（完整 RELRO /
-  BIND_NOW）；打包时断言 nginx 动态段含 `BIND_NOW`，防止参数丢失。
+  BIND_NOW）；LuaJIT 通过 `--with-luajit-xcflags`/`--with-luajit-ldflags`、
+  lualib C 模块通过 OpenResty 顶层 Makefile 注入同类参数（保留其自带 -O3，
+  模块用 `-fstack-protector-all` 保证无栈缓冲区的 resty_signal 也有 canary）。
+- 打包后**遍历所有随包 ELF** 断言 `BIND_NOW`，并对 nginx/LuaJIT/lualib/
+  共享库断言栈保护符号，防止某个组件漏加固。
 - rpath 用 `patchelf --force-rpath` 生成 `DT_RPATH`（而非 `DT_RUNPATH`），
   用户自行编译的 C 模块也能继承包内库搜索路径。
 - 发布前对 nginx/luajit、`lib/*.so*`、`luajit/lib` 与 `lualib/*.so` 执行 strip

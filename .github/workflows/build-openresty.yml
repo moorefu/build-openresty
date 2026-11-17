@@ -277,6 +277,10 @@ jobs:
       attestations: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Set version
         run: |
           echo "VERSION=${{ needs.prepare.outputs.release_version }}" >> $GITHUB_ENV
@@ -316,10 +320,13 @@ jobs:
             done
             echo "## 构建信息"
             echo
+            echo "- 构建提交: $(git rev-parse --short HEAD) $(git log -1 --pretty=%s)"
+            echo "- 构建时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "- 依赖: OpenSSL ${OS_VER} / PCRE2 ${PCRE_VER} / zlib ${ZLIB_VER} (随包分发)"
             echo "- Linux 基线: glibc 2.17; macOS 基线: ${MACOS_MIN}"
-            echo "- Linux 加固: stack protector / FORTIFY / 完整 RELRO (BIND_NOW)"
+            echo "- Linux 加固: stack protector / FORTIFY / 完整 RELRO (BIND_NOW, 含 LuaJIT 与 lualib C 模块)"
             echo "- 默认 conf 监听 8080; 不支持 Alpine/musl; resty/opm 需要 Perl"
+            echo "- 同名 tag 的资产可能被后续构建覆盖, 以上面的提交与时间为准"
             echo
             echo "## 校验与来源"
             echo

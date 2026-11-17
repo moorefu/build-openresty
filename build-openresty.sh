@@ -9,7 +9,8 @@ set -e
 # OpenSSL/PCRE2/zlib 位于包内 lib/, LuaJIT 位于包内 luajit/lib/,
 # nginx 与 luajit 解释器的 rpath 用 patchelf 改写为 $ORIGIN 相对路径
 # (DT_RPATH), 解压到任意目录即用, 目标机器只需 glibc >= 2.17。
-# 编译加固: 栈保护 + FORTIFY + 完整 RELRO (BIND_NOW), 随包共享库 strip。
+# 编译加固: 栈保护 + FORTIFY + 完整 RELRO (BIND_NOW), 覆盖 nginx/依赖库/
+# LuaJIT/lualib C 模块; 随包共享库 strip。
 # 产出 openresty-<版本>-linux-glibc2.17-<架构>-openssl-<ssl版本>.tar.xz (+ .sha256),
 # 包内顶层目录为纯版本名: openresty-<版本>/{bin,lib,nginx,luajit,lualib,site}。
 #
@@ -62,7 +63,13 @@ NPROC=$(nproc)
 
 # 加固编译选项 (OpenSSL/PCRE2/zlib/nginx 共用): 栈保护 + FORTIFY + 完整 RELRO。
 # -fPIC 让产物可作为 PIE/动态模块基础; BIND_NOW (-z now) 需要链接期生效。
-HARDEN_CFLAGS="-O2 -fstack-protector-strong -fPIC -D_FORTIFY_SOURCE=2"
+# LuaJIT/lualib C 模块自带 -O3 等优化参数, 只追加 EXTRA, 不覆盖它们自己的 -O。
+# lualib 模块用 -fstack-protector-all: 像 resty_signal 这种没有栈缓冲区的
+# 代码用 -strong 不会生成 canary, 统一用 -all 保证每个函数都有栈保护。
+HARDEN_CFLAGS_EXTRA="-fstack-protector-strong -fPIC -D_FORTIFY_SOURCE=2"
+HARDEN_CFLAGS_LUALIB="-O2 -fstack-protector-all -fPIC -D_FORTIFY_SOURCE=2"
+HARDEN_CFLAGS_LUALIB_NOOPT="-fstack-protector-all -fPIC -D_FORTIFY_SOURCE=2"
+HARDEN_CFLAGS="-O2 $HARDEN_CFLAGS_EXTRA"
 HARDEN_LDFLAGS="-Wl,-z,relro,-z,now"
 
 log() { echo "==> $*"; }
@@ -212,6 +219,16 @@ LD_OPTS="-L$DEPS/openssl/lib -L$DEPS/pcre2/lib -L$DEPS/zlib/lib \
     -Wl,-rpath,$DEPS/openssl/lib -Wl,-rpath,$DEPS/pcre2/lib -Wl,-rpath,$DEPS/zlib/lib \
     $HARDEN_LDFLAGS"
 
+# LuaJIT 上游在非 Windows 的 src/Makefile 里显式追加 -fno-stack-protector,
+# 会覆盖 --with-luajit-xcflags 里的栈保护开关。这里在 configure 构建 LuaJIT
+# 之前替换为 -fstack-protector-strong, 让 luajit 二进制/动态库也带 canary。
+[ "$(ls bundle/LuaJIT-*/src/Makefile 2>/dev/null | wc -l)" = "1" ] || {
+  echo "错误: 未找到唯一的 LuaJIT src/Makefile" >&2; exit 1; }
+sed -i 's/^\(  TARGET_XCFLAGS+= \)-fno-stack-protector$/\1-fstack-protector-strong/' \
+  bundle/LuaJIT-*/src/Makefile
+grep -q 'TARGET_XCFLAGS+= -fstack-protector-strong' bundle/LuaJIT-*/src/Makefile || {
+  echo "错误: 替换 LuaJIT -fno-stack-protector 失败" >&2; exit 1; }
+
 ./configure \
   --prefix="$PREFIX" \
   --with-cc-opt="$CC_OPTS" \
@@ -226,6 +243,8 @@ LD_OPTS="-L$DEPS/openssl/lib -L$DEPS/pcre2/lib -L$DEPS/zlib/lib \
   --with-stream \
   --with-stream_ssl_module \
   --with-luajit \
+  --with-luajit-xcflags="$HARDEN_CFLAGS_EXTRA" \
+  --with-luajit-ldflags="$HARDEN_LDFLAGS" \
   --add-module="$(pwd)/../${PROXY_CONNECT_DIR}" \
   -j"$NPROC"
 
@@ -254,6 +273,39 @@ echo "==> Patching resty CLI for portability (${RESTY_CLI_DIR})"
 patch -d "${RESTY_CLI_DIR}" -p1 --fuzz=3 \
   < "${SCRIPT_DIR}/patches/resty-cli-portable.patch"
 
+# OpenResty 顶层 Makefile 里 lualib C 模块 (cjson/redis-parser/rds-parser/
+# resty-signal) 的 recipe 不继承 nginx 的 --with-cc-opt/--with-ld-opt; 这里把
+# 加固参数注入 recipe 变量 (不覆盖它们自带的 -O3)。模块统一用
+# -fstack-protector-all: resty_signal 这类没有栈缓冲区的代码用 -strong 不会
+# 生成 canary。LuaJIT 本身由 configure 的 --with-luajit-xcflags/
+# --with-luajit-ldflags 覆盖。
+log "为 lualib C 模块注入加固参数"
+export HARDEN_CFLAGS_LUALIB HARDEN_CFLAGS_LUALIB_NOOPT HARDEN_LDFLAGS
+perl -i -pe '
+    if (/lua-cjson/) {
+        s/CJSON_CFLAGS="([^"]*)"/CJSON_CFLAGS="$1 $ENV{HARDEN_CFLAGS_LUALIB_NOOPT}"/g;
+        if (/CJSON_LDFLAGS=/) {
+            s/CJSON_LDFLAGS="([^"]*)"/CJSON_LDFLAGS="$1 $ENV{HARDEN_LDFLAGS}"/g;
+        } else {
+            s/$/ CJSON_LDFLAGS="$ENV{HARDEN_LDFLAGS} -shared"/;
+        }
+    }
+    if (/lua-redis-parser/) {
+        if (/LDFLAGS="([^"]*)"/) {
+            s/LDFLAGS="([^"]*)"/LDFLAGS="$1 $ENV{HARDEN_LDFLAGS}"/g;
+        } else {
+            s/$/ LDFLAGS="$ENV{HARDEN_LDFLAGS} -shared"/;
+        }
+        s/$/ CFLAGS="$ENV{HARDEN_CFLAGS_LUALIB}"/;
+    }
+    if (/lua-rds-parser/) {
+        s/$/ CFLAGS="$ENV{HARDEN_CFLAGS_LUALIB}" LDFLAGS="$ENV{HARDEN_LDFLAGS} -shared"/;
+    }
+    if (/lua-resty-signal/) {
+        s/$/ CFLAGS="$ENV{HARDEN_CFLAGS_LUALIB} -fpic" LDFLAGS="$ENV{HARDEN_LDFLAGS} -shared"/;
+    }
+' Makefile
+
 make -j"$NPROC"
 make install DESTDIR="$(pwd)/install"
 
@@ -265,6 +317,12 @@ INNER="openresty-$VERSION"
 STAGE="/tmp/.or-stage.$$"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp -a "install$PREFIX" "$STAGE/$INNER"
+
+# 顶层 include/luajit-2.1: 供用户编译 Lua C 模块 (与 Windows 包布局一致)
+mkdir -p "$STAGE/$INNER/include"
+cp -a "$STAGE/$INNER/luajit/include/luajit-2.1" "$STAGE/$INNER/include/"
+[ -f "$STAGE/$INNER/include/luajit-2.1/lua.h" ] || {
+  echo "错误: 打包顶层 LuaJIT 头文件失败" >&2; exit 1; }
 
 # 1) 依赖 .so 打进包内 lib/ (cp -P 保留 soname 符号链接链)
 mkdir -p "$STAGE/$INNER/lib"
@@ -307,6 +365,28 @@ readelf -d "$STAGE/$INNER/nginx/sbin/nginx" | grep -q 'BIND_NOW' || {
   echo "错误: nginx 未启用 BIND_NOW (完整 RELRO)" >&2; exit 1; }
 readelf -d "$STAGE/$INNER/nginx/sbin/nginx" | grep -q '(RPATH)' || {
   echo "错误: nginx 未使用 DT_RPATH (patchelf --force-rpath 未生效)" >&2; exit 1; }
+
+# 遍历所有随包 ELF: 必须启用完整 RELRO (BIND_NOW); 关键 C 模块/共享库还要
+# 有栈保护。LuaJIT 与 lualib C 模块走 OpenResty 自己的构建流程, 参数由
+# configure --with-luajit-* 与顶层 Makefile 注入, 这里做门禁防回归。
+for elf in $(find "$STAGE/$INNER" -type f | while read -r f; do
+    file -b "$f" 2>/dev/null | grep -q 'ELF' && echo "$f"; done); do
+  readelf -d "$elf" 2>/dev/null | grep -q 'BIND_NOW' || {
+    echo "错误: $elf 未启用 BIND_NOW (完整 RELRO)" >&2; exit 1; }
+done
+for rel in nginx/sbin/nginx luajit/bin/luajit luajit/lib/libluajit-5.1.so.2 \
+           lualib/cjson.so lualib/librestysignal.so lualib/redis/parser.so \
+           lualib/rds/parser.so; do
+  [ -f "$STAGE/$INNER/$rel" ] || {
+    echo "错误: 缺少 $rel" >&2; exit 1; }
+  readelf -sW "$STAGE/$INNER/$rel" 2>/dev/null | grep -q '__stack_chk_fail' || {
+    echo "错误: $rel 未启用栈保护" >&2; exit 1; }
+done
+for so in "$STAGE/$INNER/lib/"*.so.*; do
+  [ -f "$so" ] || continue
+  readelf -sW "$so" 2>/dev/null | grep -q '__stack_chk_fail' || {
+    echo "错误: $so 未启用栈保护" >&2; exit 1; }
+done
 
 # 兜底: 安装树里其余 ELF 的动态段不允许残留构建期绝对路径
 for elf in $(find "$STAGE/$INNER" -type f | while read -r f; do
@@ -501,7 +581,8 @@ OpenResty $VERSION 便携版 (Linux $ARCH, glibc >= 2.17)
     方式随包分发 (lib/ 与 luajit/lib/), 二进制 rpath 指向包内目录
     (\$ORIGIN 相对路径, 不依赖系统安装)
   - 内置 ngx_http_proxy_connect_module (HTTP CONNECT 正向代理)
-  - 构建启用栈保护/FORTIFY/完整 RELRO (BIND_NOW), 随包共享库已 strip
+  - 构建启用栈保护/FORTIFY/完整 RELRO (BIND_NOW, 含 LuaJIT 与 lualib
+    C 模块), 随包共享库已 strip
 
 基本用法 (推荐, 自动定位包内 nginx/ 为 prefix):
   ./bin/openresty                     # 启动 (默认 conf 监听 8080, 非 root 即可)
@@ -518,6 +599,7 @@ Debian/Ubuntu 以 root 启动时, wrapper 会自动探测组名并注入
 
 目录结构:
   bin/     openresty 启动 wrapper, resty CLI, opm 包管理器
+  include/ LuaJIT 头文件 (luajit-2.1/, 编译 Lua C 模块用)
   lib/     OpenSSL/PCRE2/zlib/libcrypt 动态库
   nginx/   nginx 核心 (sbin/nginx, conf/, html/, logs/)
   luajit/  LuaJIT 解释器与动态库
